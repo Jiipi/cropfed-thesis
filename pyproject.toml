@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cropfed-thesis"
+version = "0.1.0"
+description = "Federated learning system for image-based crop pest and disease recognition on distributed Non-IID data"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Proprietary - graduation thesis project" }
+authors = [{ name = "Thesis student" }]
+dependencies = [
+  "flwr[simulation]>=1.32,<2",
+  "numpy>=2.0,<3",
+  "pillow>=10,<13",
+  "torch>=2.7,<3",
+  "torchvision>=0.22,<1",
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.116,<1",
+  "psycopg[binary]>=3.2,<4",
+  "sqlmodel>=0.0.24,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<10",
+  "pyyaml>=6,<7",
+  "ruff>=0.12,<1",
+]
+
+[project.scripts]
+cropfed = "cropfed.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cropfed"]
+
+[tool.flwr.app]
+publisher = "graduation-thesis"
+fab-include = ["src/cropfed/**/*.py"]
+
+[tool.flwr.app.components]
+serverapp = "cropfed.flower.server_app:app"
+clientapp = "cropfed.flower.client_app:app"
+
+[tool.flwr.app.config]
+num-server-rounds = 10
+num-clients = 4
+fraction-train = 1.0
+fraction-evaluate = 1.0
+local-epochs = 2
+batch-size = 32
+learning-rate = 0.001
+seed = 2026
+algorithm = "fedavg"
+proximal-mu = 0.01
+partition-kind = "dirichlet"
+dirichlet-alpha = 0.5
+model-name = "mobilenet_v2"
+pretrained = true
+client-data-root = "./data/clients"
+central-test-manifest = "./data/processed/test_manifest.csv"
+save-model = true
+output-dir = "./artifacts/flower"
+result-kind = "federated_image_pilot"
+research-result-valid = false
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

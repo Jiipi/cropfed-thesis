@@ -1,0 +1,10 @@
+scenario_id,training_mode,algorithm,partition,alpha,model,num_clients,max_rounds_or_epochs,local_epochs,seeds,priority
+CEN-MBV2,centralized,AdamW,pooled,,mobilenet_v2,1,30,,2026|2027|2028,mandatory
+LOC-MBV2,local-only,AdamW,natural-client,,mobilenet_v2,4,30,,2026|2027|2028,mandatory
+FL-IID-AVG,federated,FedAvg,iid,,mobilenet_v2,4,30,1,2026|2027|2028,mandatory
+FL-A05-AVG,federated,FedAvg,dirichlet,0.5,mobilenet_v2,4,30,1,2026|2027|2028,mandatory
+FL-A01-AVG,federated,FedAvg,dirichlet,0.1,mobilenet_v2,4,30,1,2026|2027|2028,mandatory
+FL-A05-PROX,federated,FedProx,dirichlet,0.5,mobilenet_v2,4,30,1,2026|2027|2028,mandatory
+FL-A01-PROX,federated,FedProx,dirichlet,0.1,mobilenet_v2,4,30,1,2026|2027|2028,mandatory
+FL-A01-R18,federated,FedAvg,dirichlet,0.1,resnet18,4,30,1,2026,advanced
+

@@ -1,0 +1,89 @@
+name: cropfed-thesis
+
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cropfed}
+      POSTGRES_USER: ${POSTGRES_USER:-cropfed}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/generate_local_secrets.py first}
+    volumes:
+      - cropfed-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cropfed} -d ${POSTGRES_DB:-cropfed}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      CROPFED_DATABASE_URL: >-
+        postgresql+psycopg://${POSTGRES_USER:-cropfed}:${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-cropfed}
+      CROPFED_CORS_ORIGINS: ${CROPFED_CORS_ORIGINS:-https://localhost:8443}
+      CROPFED_API_AUTH_ENABLED: ${CROPFED_API_AUTH_ENABLED:-true}
+      CROPFED_API_ADMIN_TOKEN: ${CROPFED_API_ADMIN_TOKEN:?missing admin API token}
+      CROPFED_API_VIEWER_TOKEN: ${CROPFED_API_VIEWER_TOKEN:?missing viewer API token}
+      CROPFED_FLOWER_WORKER_ENABLED: ${CROPFED_FLOWER_WORKER_ENABLED:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - cropfed-artifacts:/app/artifacts
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  worker:
+    profiles: ["flower"]
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: ["python", "-m", "cropfed.api.worker"]
+    environment:
+      CROPFED_DATABASE_URL: >-
+        postgresql+psycopg://${POSTGRES_USER:-cropfed}:${POSTGRES_PASSWORD:?missing POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-cropfed}
+      CROPFED_FLOWER_WORKER_ENABLED: ${CROPFED_FLOWER_WORKER_ENABLED:-false}
+      CROPFED_FLOWER_PROJECT_DIR: /app
+      CROPFED_FLOWER_DATA_ROOT: /app/data/flower-profiles
+      CROPFED_FLOWER_OUTPUT_ROOT: /app/artifacts/flower-api
+      CROPFED_FLOWER_HOME: /app/artifacts/.flwr
+      CROPFED_FLOWER_NUM_CPUS: ${CROPFED_FLOWER_NUM_CPUS:-4}
+      CROPFED_FLOWER_PRETRAINED: ${CROPFED_FLOWER_PRETRAINED:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - cropfed-artifacts:/app/artifacts
+      - ./data:/app/data:ro
+
+  web:
+    build:
+      context: frontend
+    ports:
+      - "8080:80"
+      - "8443:443"
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./secrets/web-tls:/etc/nginx/tls:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  cropfed-db:
+  cropfed-artifacts:
