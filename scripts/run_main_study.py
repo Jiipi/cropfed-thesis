@@ -9,7 +9,9 @@ Usage:
     python scripts/run_main_study.py \\
         --output-root artifacts/main-study-seed2026 \\
         --rounds 10 --local-epochs 1 --num-cpus 4 \\
-        [--only FL-IID-AVG]
+        [--only FL-IID-AVG [--only FL-A01-SCAF ...]]
+
+    python scripts/run_main_study.py --list-scenarios --output-root /tmp/x
 """
 
 from __future__ import annotations
@@ -34,14 +36,34 @@ from cropfed.experiments.centralized import run_centralized  # noqa: E402
 from cropfed.experiments.local_only import run_local_only  # noqa: E402
 from cropfed.flower.client_app import app as client_app  # noqa: E402
 from cropfed.flower.server_app import app as server_app  # noqa: E402
-from cropfed.flower.smoke import validate_run_artifacts  # noqa: E402
+from cropfed.flower.smoke import SUPPORTED_ALGORITHMS, validate_run_artifacts  # noqa: E402
 
 NUM_CLIENTS = 4
 DEFAULT_PROXIMAL_MU = 0.01
+DEFAULT_SCAFFOLD_SERVER_LR = 1.0
+DEFAULT_MOON_TEMPERATURE = 0.5
+DEFAULT_MOON_MU = 1.0
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 RUN_CONFIG_HEADER = "[tool.flwr.app.config]"
 
+#: Profile shorthand used in scenario ids -> directory under --profiles-root.
+PROFILE_DIRECTORIES: dict[str, str] = {
+    "iid": "iid",
+    "alpha-100": "dirichlet-alpha-100",
+    "alpha-0.5": "dirichlet-alpha-0.5",
+    "alpha-0.1": "dirichlet-alpha-0.1",
+    "quantity-skew": "quantity-skew",
+    "feature-skew": "feature-skew",
+}
 
+
+# The matrix answers the proposal's comparison questions in one pass:
+#   * baselines (centralized, local-only) to frame every federated number;
+#   * fedavg across four label-skew levels, to show degradation;
+#   * the four non-IID-robust algorithms against the same alpha-0.1 profile,
+#     so the algorithm is the only variable when they are compared;
+#   * fedavg vs the best-known robust algorithm on quantity and feature skew,
+#     so the two new skews are not merely partitioned but actually measured.
 SCENARIOS: list[dict[str, object]] = [
     {"id": "CEN-MBV3", "mode": "centralized", "profile": "iid", "algorithm": "centralized"},
     {"id": "LOC-MBV3", "mode": "local-only", "profile": "alpha-0.5", "algorithm": "local-only"},
@@ -51,23 +73,84 @@ SCENARIOS: list[dict[str, object]] = [
     {"id": "FL-A01-AVG", "mode": "federated", "profile": "alpha-0.1", "algorithm": "fedavg"},
     {"id": "FL-A05-PROX", "mode": "federated", "profile": "alpha-0.5", "algorithm": "fedprox"},
     {"id": "FL-A01-PROX", "mode": "federated", "profile": "alpha-0.1", "algorithm": "fedprox"},
+    {"id": "FL-A01-BN", "mode": "federated", "profile": "alpha-0.1", "algorithm": "fedbn"},
+    {"id": "FL-A01-SCAF", "mode": "federated", "profile": "alpha-0.1", "algorithm": "scaffold"},
+    {"id": "FL-A01-MOON", "mode": "federated", "profile": "alpha-0.1", "algorithm": "moon"},
+    {"id": "FL-QTY-AVG", "mode": "federated", "profile": "quantity-skew", "algorithm": "fedavg"},
+    {"id": "FL-QTY-PROX", "mode": "federated", "profile": "quantity-skew", "algorithm": "fedprox"},
+    {"id": "FL-FEAT-AVG", "mode": "federated", "profile": "feature-skew", "algorithm": "fedavg"},
+    {"id": "FL-FEAT-BN", "mode": "federated", "profile": "feature-skew", "algorithm": "fedbn"},
 ]
 
 
 def _resolve_profile_dir(profile: str, profiles_root: Path) -> Path:
-    base = profiles_root
-    if profile == "iid":
-        return base / "iid"
-    if profile.startswith("alpha-"):
-        return base / f"dirichlet-alpha-{profile.removeprefix('alpha-')}"
-    raise ValueError(f"unknown profile: {profile}")
+    try:
+        directory = PROFILE_DIRECTORIES[profile]
+    except KeyError:
+        raise ValueError(
+            f"unknown profile: {profile}; expected one of "
+            + ", ".join(sorted(PROFILE_DIRECTORIES))
+        ) from None
+    return profiles_root / directory
 
 
-def _profile_alpha(profile_dir: Path) -> float | None:
-    prefix = "dirichlet-alpha-"
-    if profile_dir.name.startswith(prefix):
-        return float(profile_dir.name.removeprefix(prefix))
-    return None
+def _read_profile_metadata(profile_dir: Path) -> dict[str, object]:
+    """Read partition metadata from the profile's own artifact.
+
+    Deriving ``partition_kind`` from the directory name used to be enough when
+    every non-IID profile was Dirichlet, but it silently mislabels the quantity
+    and feature skews — a quantity-skew run would record itself as
+    ``dirichlet`` with ``alpha=0``, contradicting its own partition summary and
+    invalidating the protocol lock.  The artifact already states the truth.
+    """
+
+    profile_path = profile_dir / "profile.json"
+    if not profile_path.is_file():
+        raise FileNotFoundError(
+            f"profile metadata not found: {profile_path}; regenerate the profile "
+            "with `cropfed prepare-full-profiles`"
+        )
+    document = json.loads(profile_path.read_text(encoding="utf-8"))
+    partition_kind = str(document.get("partition_kind", ""))
+    if partition_kind not in {"iid", "dirichlet", "quantity_skew", "feature_skew"}:
+        raise ValueError(
+            f"{profile_path} declares an unsupported partition_kind: {partition_kind!r}"
+        )
+    # A quantity-skew profile partitions labels IID and then reshapes the client
+    # sizes, so its spec records partition_kind='iid' plus quantity_skew=True.
+    # Reporting it as 'iid' would erase the skew from every artifact.
+    if bool(document.get("quantity_skew", False)):
+        partition_kind = "quantity_skew"
+    alpha = document.get("dirichlet_alpha")
+    return {
+        "partition_kind": partition_kind,
+        "dirichlet_alpha": float(alpha) if alpha is not None else None,
+        "feature_skew_strength": document.get("feature_skew_strength"),
+        "name": str(document.get("name", profile_dir.name)),
+    }
+
+
+def _algorithm_hyperparameters(
+    algorithm: str,
+    *,
+    proximal_mu: float,
+    scaffold_server_lr: float,
+    moon_temperature: float,
+    moon_mu: float,
+) -> dict[str, float]:
+    """Mirror the server's rule: a hyperparameter is 0.0 when not applicable.
+
+    Kept identical to ``server_app._algorithm_hyperparameters`` so the values
+    the launcher verifies are exactly the ones the run recorded.
+    """
+
+    algorithm = algorithm.lower()
+    return {
+        "proximal_mu": proximal_mu if algorithm == "fedprox" else 0.0,
+        "scaffold_server_lr": scaffold_server_lr if algorithm == "scaffold" else 0.0,
+        "moon_temperature": moon_temperature if algorithm == "moon" else 0.0,
+        "moon_mu": moon_mu if algorithm == "moon" else 0.0,
+    }
 
 
 def _scenario_tag(scenario_id: str, *, seed: int) -> str:
@@ -171,6 +254,7 @@ def _run_local_only(
     research_result_valid: bool,
     protocol_lock: Path | None,
 ) -> dict[str, object]:
+    metadata = _read_profile_metadata(profile_dir)
     return run_local_only(
         client_data_root=profile_dir / "clients",
         test_manifest=profile_dir / "test_manifest.csv",
@@ -182,10 +266,8 @@ def _run_local_only(
         pretrained=True,
         seed=seed,
         output_dir=output_dir,
-        partition_kind=(
-            "dirichlet" if profile_dir.name != "iid" else "iid"
-        ),
-        dirichlet_alpha=_profile_alpha(profile_dir),
+        partition_kind=str(metadata["partition_kind"]),
+        dirichlet_alpha=metadata["dirichlet_alpha"],
         research_result_valid=research_result_valid,
         protocol_lock=protocol_lock,
         class_names=taxonomy.class_names,
@@ -203,6 +285,9 @@ def _run_federated(
     batch_size: int,
     learning_rate: float,
     proximal_mu: float,
+    scaffold_server_lr: float,
+    moon_temperature: float,
+    moon_mu: float,
     seed: int,
     pretrained: bool,
     num_cpus: int,
@@ -214,12 +299,21 @@ def _run_federated(
 ) -> dict[str, object]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty run: {output_dir}")
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        raise ValueError(
+            f"unsupported algorithm: {algorithm}; expected one of "
+            + ", ".join(sorted(SUPPORTED_ALGORITHMS))
+        )
+    if algorithm in {"fedbn", "moon"} and rounds < 2:
+        # Both need a previous round's local state, so a single round cannot
+        # demonstrate them and the artifact validator would reject the run
+        # after all the GPU time had been spent.
+        raise ValueError(f"{algorithm} requires at least 2 rounds, got {rounds}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    partition_kind = (
-        "dirichlet" if profile_dir.name != "iid" else "iid"
-    )
-    dirichlet_alpha = _profile_alpha(profile_dir)
+    metadata = _read_profile_metadata(profile_dir)
+    partition_kind = str(metadata["partition_kind"])
+    dirichlet_alpha = metadata["dirichlet_alpha"]
 
     run_config_entries = {
         "num-server-rounds": rounds,
@@ -232,6 +326,9 @@ def _run_federated(
         "seed": seed,
         "algorithm": algorithm,
         "proximal-mu": proximal_mu,
+        "scaffold-server-lr": scaffold_server_lr,
+        "moon-temperature": moon_temperature,
+        "moon-mu": moon_mu,
         "partition-kind": partition_kind,
         "dirichlet-alpha": dirichlet_alpha or 0.0,
         "model-name": model_name,
@@ -285,8 +382,17 @@ def _run_federated(
         proximal_mu=proximal_mu,
         log_text=log_text,
         expected_class_order=taxonomy.class_names,
+        hyperparameters=_algorithm_hyperparameters(
+            algorithm,
+            proximal_mu=proximal_mu,
+            scaffold_server_lr=scaffold_server_lr,
+            moon_temperature=moon_temperature,
+            moon_mu=moon_mu,
+        ),
     )
     validation["elapsed_seconds"] = elapsed
+    validation["partition_kind"] = partition_kind
+    validation["dirichlet_alpha"] = dirichlet_alpha
     return validation
 
 
@@ -308,6 +414,9 @@ def run_scenario(
     research_result_valid: bool,
     protocol_lock_root: Path | None,
     proximal_mu: float,
+    scaffold_server_lr: float = DEFAULT_SCAFFOLD_SERVER_LR,
+    moon_temperature: float = DEFAULT_MOON_TEMPERATURE,
+    moon_mu: float = DEFAULT_MOON_MU,
 ) -> dict[str, object]:
     profile_dir = _resolve_profile_dir(str(scenario["profile"]), profiles_root)
     output_dir = output_root / _scenario_tag(str(scenario["id"]), seed=seed)
@@ -354,6 +463,9 @@ def run_scenario(
             batch_size=batch_size,
             learning_rate=learning_rate,
             proximal_mu=proximal_mu,
+            scaffold_server_lr=scaffold_server_lr,
+            moon_temperature=moon_temperature,
+            moon_mu=moon_mu,
             seed=seed,
             pretrained=pretrained,
             num_cpus=num_cpus,
@@ -382,7 +494,7 @@ def run_scenario(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--rounds", type=int, default=30)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -406,19 +518,52 @@ def main() -> int:
         default="mobilenet_v3_small",
     )
     parser.add_argument("--proximal-mu", type=float, default=DEFAULT_PROXIMAL_MU)
+    parser.add_argument(
+        "--scaffold-server-lr", type=float, default=DEFAULT_SCAFFOLD_SERVER_LR
+    )
+    parser.add_argument(
+        "--moon-temperature", type=float, default=DEFAULT_MOON_TEMPERATURE
+    )
+    parser.add_argument("--moon-mu", type=float, default=DEFAULT_MOON_MU)
     parser.add_argument("--research-run", action="store_true")
     parser.add_argument(
         "--protocol-lock-root",
         type=Path,
         help="directory containing one locked JSON file named <scenario-id>.json",
     )
-    parser.add_argument("--only", choices=[s["id"] for s in SCENARIOS])
+    parser.add_argument(
+        "--only",
+        action="append",
+        choices=[s["id"] for s in SCENARIOS],
+        help="run only this scenario; repeatable to select several",
+    )
+    parser.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        help="print the scenario matrix and exit without running anything",
+    )
     args = parser.parse_args()
+
+    if args.list_scenarios:
+        for scenario in SCENARIOS:
+            print(
+                f"{scenario['id']:<14} {scenario['mode']:<12} "
+                f"{scenario['algorithm']:<11} {scenario['profile']}"
+            )
+        return 0
 
     if args.research_run and args.protocol_lock_root is None:
         parser.error("--research-run requires --protocol-lock-root")
+    if args.output_root is None:
+        parser.error("--output-root is required unless --list-scenarios is given")
     if args.num_gpus < 0:
         parser.error("--num-gpus cannot be negative")
+    if args.scaffold_server_lr <= 0:
+        parser.error("--scaffold-server-lr must be positive")
+    if args.moon_temperature <= 0:
+        parser.error("--moon-temperature must be positive")
+    if args.moon_mu < 0:
+        parser.error("--moon-mu cannot be negative")
 
     taxonomy = taxonomy_from_scope(args.taxonomy)
     profiles_root = args.profiles_root.expanduser().resolve()
@@ -436,7 +581,10 @@ def main() -> int:
 
     selected = SCENARIOS
     if args.only:
-        selected = [s for s in SCENARIOS if s["id"] == args.only]
+        # Keep matrix order rather than the order the flags were typed, so two
+        # invocations of the same set produce comparable summaries.
+        requested = set(args.only)
+        selected = [s for s in SCENARIOS if s["id"] in requested]
 
     results: list[dict[str, object]] = []
     started = time.perf_counter()
@@ -459,6 +607,9 @@ def main() -> int:
                 research_result_valid=args.research_run,
                 protocol_lock_root=protocol_lock_root,
                 proximal_mu=args.proximal_mu,
+                scaffold_server_lr=args.scaffold_server_lr,
+                moon_temperature=args.moon_temperature,
+                moon_mu=args.moon_mu,
             )
         except Exception as error:
             row = {
@@ -473,14 +624,20 @@ def main() -> int:
     total_elapsed = time.perf_counter() - started
     summary_path = output_root / "main_study_summary.json"
     all_succeeded = all(row.get("status") != "failed" for row in results)
+    # A subset run is a legitimate way to re-run one scenario, but the summary
+    # of a subset is not the main study and must not claim to be: the
+    # comparison table it feeds would silently be missing rows.
+    matrix_complete = len(selected) == len(SCENARIOS)
+    research_valid = bool(args.research_run and all_succeeded and matrix_complete)
     summary = {
         "status": "completed" if all_succeeded else "failed",
         "result_kind": (
             "federated_image_research_candidate"
-            if args.research_run and all_succeeded
+            if research_valid
             else "federated_image_main_study_pilot"
         ),
-        "research_result_valid": bool(args.research_run and all_succeeded),
+        "research_result_valid": research_valid,
+        "matrix_complete": matrix_complete,
         "num_clients": NUM_CLIENTS,
         "taxonomy_scope": taxonomy.scope,
         "class_order": list(taxonomy.class_names),
@@ -492,11 +649,16 @@ def main() -> int:
             "seed": args.seed,
             "pretrained": True,
             "proximal_mu": args.proximal_mu,
+            "scaffold_server_lr": args.scaffold_server_lr,
+            "moon_temperature": args.moon_temperature,
+            "moon_mu": args.moon_mu,
             "model": args.model,
             "profiles_root": str(profiles_root),
             "num_cpus": args.num_cpus,
             "num_gpus": args.num_gpus,
         },
+        "scenarios_selected": [str(s["id"]) for s in selected],
+        "scenarios_available": [str(s["id"]) for s in SCENARIOS],
         "total_elapsed_seconds": total_elapsed,
         "scenarios": results,
     }

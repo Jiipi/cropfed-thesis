@@ -296,12 +296,30 @@ class TrackedFedProx(_TrackingMixin, FedProx):
 
 
 class TrackedFedBN(_TrackingMixin, FedAvg):
-    """FedBN: FedAvg strategy but batch-norm stats stay local.
+    """FedBN (Li et al., 2021): batch-norm statistics stay on the client.
 
-    The server aggregates all parameters — the BN exclusion is handled
-    on the client side via the fedbn_* aggregation functions.  At the
-    Flower strategy level FedBN behaves identically to FedAvg.
+    Server aggregation is FedAvg over every tensor, because the exclusion is
+    enforced where it belongs — the client restores its own BN statistics over
+    the averaged ones before training and before validating.  This strategy's
+    job is therefore to prove the clients really did so: from round 2 onwards
+    every client must report a non-zero ``fedbn_local_bn_tensors``, otherwise
+    the run is plain FedAvg wearing a FedBN label.
+
+    Round 1 is exempt: no client has local statistics to restore yet.
     """
+
+    def aggregate_train(self, server_round: int, replies: Iterable[Message]):
+        reply_list = list(replies)
+        arrays, metrics = super().aggregate_train(server_round, reply_list)
+        if metrics is not None and server_round > 1:
+            restored = float(metrics.get("fedbn_local_bn_tensors", 0.0))
+            if restored <= 0.0:
+                raise RuntimeError(
+                    "FedBN clients restored no local batch-norm statistics in "
+                    f"round {server_round}; local training used the averaged BN "
+                    "and the result would be plain FedAvg"
+                )
+        return arrays, metrics
 
 
 class TrackedSCAFFOLD(_TrackingMixin, FedAvg):

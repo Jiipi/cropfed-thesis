@@ -155,9 +155,9 @@ Trạng thái sau khi sửa (20 test mới, toàn bộ đạt):
 | `fl/aggregation.py:275` | ✓ | ✓ | ✓ `:114` | ✓ `:197` | ✓ `:261` |
 | `flower/server_app.py:44` | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ml/trainer.py:65` | ✓ | ✓ `proximal_mu` | — | ✓ `scaffold_*` | ✓ `moon_*` |
-| `flower/client_app.py` | ✓ | ✓ | ✓ (no-op) | **✓ ĐÃ NỐI** | **✓ ĐÃ NỐI** |
+| `flower/client_app.py` | ✓ | ✓ | **✓ ĐÃ NỐI (H4)** | **✓ ĐÃ NỐI** | **✓ ĐÃ NỐI** |
 | Whitelist API/CLI/config | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Test | ✓ | ✓ | **✓ 5 test** | **✓ 9 test** | **✓ 11 test** |
+| Test | ✓ | ✓ | **✓ 12 test** | **✓ 9 test** | **✓ 11 test** |
 
 Khoảng trống thực tế **sâu hơn mô tả ban đầu**. Ngoài client không truyền tham số,
 còn ba lỗi nữa được phát hiện khi sửa:
@@ -195,6 +195,81 @@ theo key. Vì delta SCAFFOLD trùng tên tham số với model, để nguyên s�
 control variate vào trọng số. `_take_auxiliary_arrays` phải tách record phụ
 **trước** khi aggregation của FedAvg chạy — đã có test canh gác riêng cho đúng
 thứ tự này (kiểm chứng bằng cách đảo thứ tự: test fail đúng như mong đợi).
+
+---
+
+## H. Launcher main study không chạy được A và B — ĐÃ SỬA 07/08/2026
+
+> §5 GĐ3: "Triển khai và so sánh FedProx, FedBN, SCAFFOLD, MOON"
+> §6: "IID, Dirichlet nhiều mức, lệch số lượng, lệch đặc trưng"
+
+A tạo 2 profile skew mới, B nối 3 thuật toán mới. Cả hai đều **không có đường vào
+thực nghiệm**: `SCENARIOS` chỉ có 8 dòng (`centralized`, `local-only`, 4× fedavg,
+2× fedprox) và `_resolve_profile_dir` chỉ nhận `iid`/`alpha-*`, raise `ValueError`
+khi gặp `quantity-skew`/`feature-skew`. Bảng kết quả sẽ vẫn chỉ có FedAvg/FedProx
+trên label skew, và không ai phát hiện cho tới lúc viết chương so sánh.
+
+Khi sửa mới lộ ra **ba lỗi chặn nữa**, mỗi lỗi đều đủ để hỏng một lần chạy dài:
+
+1. `parse_flower_log_evidence` raise `ValueError("algorithm must be 'fedavg' or
+   'fedprox'")`. Một run `scaffold` sẽ train hết nhiều **giờ GPU** rồi fail ở đúng
+   bước validate cuối cùng.
+2. `partition_kind` được **đoán từ tên thư mục** (`"dirichlet" if name != "iid"`)
+   trong cả `_run_local_only` lẫn `_run_federated`. Run quantity-skew sẽ tự ghi
+   `partition_kind="dirichlet", dirichlet_alpha=0.0` — mâu thuẫn với chính
+   `partition_summary.json` của nó và làm hỏng protocol lock.
+3. **`fedbn` là no-op hoàn toàn trong đường Flower.**
+   `fedbn_weighted_average_updates` chỉ gọi được từ `simulation.py`;
+   `TrackedFedBN` là alias trần của `FedAvg`; client không làm gì riêng cho BN.
+   Scenario `fedbn` sẽ sinh số của FedAvg dưới nhãn `fedbn` — đúng lỗi im lặng mà
+   D-030 vừa vá cho `scaffold`/`moon`, lặp lại ở thuật toán thứ ba.
+
+Ma trận sau khi sửa — **15 scenario**, xác minh bằng `--list-scenarios`:
+
+| Trục | Scenario |
+|---|---|
+| Baseline | `CEN-MBV3`, `LOC-MBV3` |
+| Label skew (fedavg) | `FL-IID-AVG`, `FL-A100-AVG`, `FL-A05-AVG`, `FL-A01-AVG` |
+| FedProx | `FL-A05-PROX`, `FL-A01-PROX` |
+| Thuật toán tại alpha-0.1 | `FL-A01-BN`, `FL-A01-SCAF`, `FL-A01-MOON` |
+| Quantity skew | `FL-QTY-AVG`, `FL-QTY-PROX` |
+| Feature skew | `FL-FEAT-AVG`, `FL-FEAT-BN` |
+
+Ba thuật toán mới đều đặt tại `alpha-0.1` để **thuật toán là biến duy nhất**; mỗi
+skew mới có một cặp fedavg-vs-thuật-toán-chịu-skew để đọc được chênh lệch.
+
+- [x] H1. `SCENARIOS` 8 → 15, phủ đủ 5 thuật toán và 6 profile.
+      `PROFILE_DIRECTORIES` thay ánh xạ hard-code trong `_resolve_profile_dir`.
+- [x] H2. `_profile_alpha` → `_read_profile_metadata`, đọc `profile.json` thật.
+      Quantity skew được chuyển tường minh từ `iid` sang `quantity_skew`
+      (`test_quantity_skew_is_not_reported_as_iid`).
+- [x] H3. `SUPPORTED_ALGORITHMS` + `_STRATEGY_LOG_NAMES` trong `smoke.py`; nhận cả
+      tên upstream lẫn `Tracked*` vì `strategy.start` log `__class__.__name__`.
+      Test lấy danh sách từ `get_args(Algorithm)` nên thuật toán thứ 6 sẽ tự fail.
+- [x] H4. FedBN thành thật: client khôi phục BN riêng sau khi nạp global (cả
+      nhánh train lẫn **evaluate**), báo `fedbn_local_bn_tensors`; `TrackedFedBN`
+      raise từ round 2 nếu bằng 0. `batch_norm_parameter_names` dùng chung với
+      simulator để `fedbn` không mang hai nghĩa khác nhau trong cùng luận văn.
+- [x] H5. `algorithm_artifact_evidence` — chứng cứ ở **tầng artifact**, không chỉ
+      log: SCAFFOLD phải đủ client mọi round; MOON/FedBN miễn round 1 nhưng bắt
+      buộc từ round 2; giá trị 0 tính là "không tác dụng"; history thiếu round bị
+      từ chối (run crash không được lọt qua bằng cách có ít round hơn).
+- [x] H6. Hyperparameter `scaffold_server_lr`/`moon_temperature`/`moon_mu` ghi
+      vào manifest + checkpoint + protocol lock, và được `validate_run_artifacts`
+      đối chiếu với giá trị đã yêu cầu. `test_launcher_matches_the_server_recording_rule`
+      dựng `flwr.app.Context` thật để hai bản cài đặt không trôi khỏi nhau.
+- [x] H7. `--only` lặp lại được, thêm `--list-scenarios`. Theo D-028: chạy tập con
+      thì `matrix_complete=false` và `research_result_valid=false` — summary của
+      một phần ma trận không được tự nhận là main study.
+- [x] H8. `fedbn`/`moon` với `rounds < 2` bị từ chối **trước** khi chạy, vì cả hai
+      cần trạng thái round trước; nếu không sẽ fail sau khi đã tiêu hết GPU time.
+
+**Bằng chứng:** `tests/system/test_main_study_matrix.py` (14 test, 55 subtest),
+`tests/flower/test_flower_algorithms.py` +9 test FedBN, `tests/flower/test_flower_smoke.py`
++16 test. Toàn bộ suite **130 test đạt, 113 subtest** (`pytest tests --ignore=tests/api`;
+`tests/api` không collect được vì venv hiện tại thiếu `fastapi`, có từ trước).
+`_restore_local_batch_norm` được kiểm chứng bằng mutation test: chèn `return 0`
+làm fail đúng 2 test, khôi phục xong 23 test đạt lại.
 
 ---
 
@@ -298,9 +373,11 @@ Docs mới cập nhật đến 31/07, chưa phản ánh việc chuyển sang 38 
    thuật toán và fail-fast nếu thiếu trạng thái. An toàn để chạy main study.
 2. ~~**A1–A6**~~ — **XONG 06/08/2026.** Đủ 3 skew, 6 profile trên dữ liệu thật,
    audit `passed` cả 6, D-024 kiểm chứng lại trên đĩa.
-3. **C1–C4** — metric mà §7/§8 gọi là kết quả cốt lõi.
-4. **G1–G4** — đồng bộ docs trước khi khóa protocol.
-5. **D, E, F** — GĐ4 trở đi, sau khi trục so sánh chính đã vững.
+3. ~~**H1–H8**~~ — **XONG 07/08/2026.** Launcher chạy được đủ 5 thuật toán × 6
+   profile; `fedbn` không còn là no-op. Trước H, A và B là năng lực không dùng được.
+4. **C1–C4** — metric mà §7/§8 gọi là kết quả cốt lõi.
+5. **G1–G4** — đồng bộ docs trước khi khóa protocol.
+6. **D, E, F** — GĐ4 trở đi, sau khi trục so sánh chính đã vững.
 
 ## Nguyên tắc giữ nguyên
 

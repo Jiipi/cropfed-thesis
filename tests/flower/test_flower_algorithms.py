@@ -350,5 +350,201 @@ class ClientAlgorithmStateTests(unittest.TestCase):
             torch.testing.assert_close(value, stored[name])
 
 
+@unittest.skipUnless(FLOWER_AVAILABLE, "Flower runtime is not installed")
+class FedBNStrategyTests(unittest.TestCase):
+    """FedBN aggregates like FedAvg, so the client evidence is the only proof."""
+
+    def test_absent_local_batch_norm_raises_after_the_first_round(self) -> None:
+        from cropfed.flower.tracking import TrackedFedBN
+
+        strategy = TrackedFedBN(min_available_nodes=2)
+        outgoing = [_train_message(node_id, [[0.0]]) for node_id in (101, 202)]
+        strategy._track_sent(2, "train", outgoing)
+        replies = [
+            _train_reply(outgoing[client_id], client_id, [[1.0]])
+            for client_id in (0, 1)
+        ]
+
+        with self.assertRaisesRegex(RuntimeError, "plain FedAvg"):
+            strategy.aggregate_train(2, replies)
+
+    def test_first_round_tolerates_absent_local_batch_norm(self) -> None:
+        """No client has local BN statistics before it has trained once."""
+
+        from cropfed.flower.tracking import TrackedFedBN
+
+        strategy = TrackedFedBN(min_available_nodes=2)
+        outgoing = [_train_message(node_id, [[0.0]]) for node_id in (101, 202)]
+        strategy._track_sent(1, "train", outgoing)
+        replies = [
+            _train_reply(outgoing[client_id], client_id, [[1.0]])
+            for client_id in (0, 1)
+        ]
+
+        _, metrics = strategy.aggregate_train(1, replies)
+        self.assertIsNotNone(metrics)
+
+    def test_reported_local_batch_norm_is_accepted(self) -> None:
+        from cropfed.flower.tracking import TrackedFedBN
+
+        strategy = TrackedFedBN(min_available_nodes=2)
+        outgoing = [_train_message(node_id, [[0.0]]) for node_id in (101, 202)]
+        strategy._track_sent(2, "train", outgoing)
+        replies = [
+            _train_reply(
+                outgoing[client_id],
+                client_id,
+                [[1.0]],
+                metrics={"fedbn_local_bn_tensors": 52},
+            )
+            for client_id in (0, 1)
+        ]
+
+        _, metrics = strategy.aggregate_train(2, replies)
+        assert metrics is not None
+        self.assertGreater(float(metrics["fedbn_local_bn_tensors"]), 0.0)
+
+
+@unittest.skipUnless(FLOWER_AVAILABLE, "Flower runtime is not installed")
+class FedBNClientStateTests(unittest.TestCase):
+    """The client half of FedBN: its own BN statistics survive aggregation."""
+
+    def _context(self, algorithm: str):
+        from flwr.app import Context, RecordDict
+
+        return Context(
+            run_id=1,
+            node_id=1,
+            node_config={"partition-id": 0},
+            state=RecordDict(),
+            run_config={
+                "algorithm": algorithm,
+                "model-name": "mobilenet_v3_small",
+                "taxonomy-scope": "plantvillage-full",
+            },
+        )
+
+    def _bn_model(self):
+        import torch
+
+        class _Net(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.conv = torch.nn.Conv2d(1, 2, 3)
+                self.bn = torch.nn.BatchNorm2d(2)
+
+        return _Net()
+
+    def test_local_statistics_survive_the_global_average(self) -> None:
+        """The behaviour FedBN is: after loading global weights, BN is local."""
+
+        import torch
+
+        from cropfed.flower.client_app import (
+            _restore_local_batch_norm,
+            _store_local_batch_norm,
+        )
+
+        context = self._context("fedbn")
+        model = self._bn_model()
+        with torch.no_grad():
+            model.bn.running_mean.fill_(7.0)
+            model.conv.weight.fill_(3.0)
+        _store_local_batch_norm(context, model)
+
+        # The server hands back averaged weights: BN and conv both overwritten.
+        with torch.no_grad():
+            model.bn.running_mean.fill_(0.0)
+            model.conv.weight.fill_(1.0)
+        restored = _restore_local_batch_norm(context, model, "fedbn")
+
+        self.assertGreater(restored, 0)
+        self.assertTrue(torch.all(model.bn.running_mean == 7.0))
+        # Non-BN parameters must still take the aggregated value.
+        self.assertTrue(torch.all(model.conv.weight == 1.0))
+
+    def test_first_round_restores_nothing_and_does_not_raise(self) -> None:
+        from cropfed.flower.client_app import _restore_local_batch_norm
+
+        self.assertEqual(
+            _restore_local_batch_norm(self._context("fedbn"), self._bn_model(), "fedbn"),
+            0,
+        )
+
+    def test_other_algorithms_keep_the_aggregated_batch_norm(self) -> None:
+        """Only fedbn diverges; every other algorithm uses the global BN."""
+
+        import torch
+
+        from cropfed.flower.client_app import (
+            _restore_local_batch_norm,
+            _store_local_batch_norm,
+        )
+
+        for algorithm in ("fedavg", "fedprox", "scaffold", "moon"):
+            with self.subTest(algorithm=algorithm):
+                context = self._context(algorithm)
+                model = self._bn_model()
+                with torch.no_grad():
+                    model.bn.running_mean.fill_(7.0)
+                _store_local_batch_norm(context, model)
+                with torch.no_grad():
+                    model.bn.running_mean.fill_(0.0)
+
+                self.assertEqual(
+                    _restore_local_batch_norm(context, model, algorithm), 0
+                )
+                self.assertTrue(torch.all(model.bn.running_mean == 0.0))
+
+    def test_a_model_without_batch_norm_is_rejected(self) -> None:
+        """FedBN on a BN-free model is FedAvg; say so instead of pretending."""
+
+        import torch
+
+        from cropfed.flower.client_app import _store_local_batch_norm
+
+        class _NoBatchNorm(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.linear = torch.nn.Linear(2, 2)
+
+        with self.assertRaisesRegex(RuntimeError, "no batch-norm layers"):
+            _store_local_batch_norm(self._context("fedbn"), _NoBatchNorm())
+
+    def test_stored_state_holding_non_batch_norm_tensors_is_rejected(self) -> None:
+        """Corrupt or stale client state must not overwrite trained weights."""
+
+        from cropfed.flower.client_app import (
+            FEDBN_LOCAL_BN_RECORD,
+            _restore_local_batch_norm,
+        )
+
+        context = self._context("fedbn")
+        context.state[FEDBN_LOCAL_BN_RECORD] = _numpy_record(
+            {"conv.weight": np.zeros((2, 1, 3, 3))}
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "non-batch-norm"):
+            _restore_local_batch_norm(context, self._bn_model(), "fedbn")
+
+    def test_the_selected_batch_norm_tensors_match_the_aggregation_rule(self) -> None:
+        """One definition of 'BN' across the smoke simulator and Flower path."""
+
+        from cropfed.fl.aggregation import batch_norm_parameter_names
+
+        names = batch_norm_parameter_names(self._bn_model().state_dict())
+
+        self.assertEqual(
+            names,
+            {
+                "bn.weight",
+                "bn.bias",
+                "bn.running_mean",
+                "bn.running_var",
+                "bn.num_batches_tracked",
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

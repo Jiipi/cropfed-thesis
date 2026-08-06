@@ -20,6 +20,20 @@ def strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE.sub("", text)
 
 
+#: Strategy class names that legitimately appear in the Flower log for each
+#: algorithm. Both the upstream name and this project's tracked subclass are
+#: accepted, because ``strategy.start`` logs ``self.__class__.__name__``.
+_STRATEGY_LOG_NAMES: dict[str, tuple[str, ...]] = {
+    "fedavg": ("FedAvg", "TrackedFedAvg"),
+    "fedprox": ("FedProx", "TrackedFedProx"),
+    "fedbn": ("FedBN", "TrackedFedBN"),
+    "scaffold": ("SCAFFOLD", "TrackedSCAFFOLD"),
+    "moon": ("MOON", "TrackedMOON"),
+}
+
+SUPPORTED_ALGORITHMS: frozenset[str] = frozenset(_STRATEGY_LOG_NAMES)
+
+
 def parse_flower_log_evidence(
     log_text: str,
     *,
@@ -31,14 +45,12 @@ def parse_flower_log_evidence(
 
     normalized = strip_ansi(log_text)
     algorithm = algorithm.lower()
-    if algorithm not in {"fedavg", "fedprox"}:
-        raise ValueError("algorithm must be 'fedavg' or 'fedprox'")
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        raise ValueError(
+            "algorithm must be one of " + ", ".join(sorted(SUPPORTED_ALGORITHMS))
+        )
 
-    strategy_names = (
-        ("FedAvg", "TrackedFedAvg")
-        if algorithm == "fedavg"
-        else ("FedProx", "TrackedFedProx")
-    )
+    strategy_names = _STRATEGY_LOG_NAMES[algorithm]
     strategy_started = any(
         f"Starting {strategy_name} strategy:" in normalized
         for strategy_name in strategy_names
@@ -72,6 +84,89 @@ def parse_flower_log_evidence(
     return evidence
 
 
+def algorithm_artifact_evidence(
+    metrics_payload: dict[str, Any],
+    *,
+    algorithm: str,
+    expected_clients: int,
+    num_rounds: int,
+) -> dict[str, Any]:
+    """Prove from the artifacts that clients really ran the named algorithm.
+
+    The Flower log only shows which strategy started.  FedBN, SCAFFOLD and MOON
+    all aggregate like FedAvg on the server, so a run whose clients silently
+    skipped the algorithm produces a log that looks perfect and a results table
+    that differs from FedAvg only by noise.  The per-round metrics are the only
+    place that difference is recorded, so they are what gets checked.
+
+    Round 1 is exempt for MOON and FedBN: neither has previous local state to
+    use in the first round, and demanding it would be a false failure.
+    """
+
+    algorithm = algorithm.lower()
+    if algorithm not in SUPPORTED_ALGORITHMS:
+        raise ValueError(
+            "algorithm must be one of " + ", ".join(sorted(SUPPORTED_ALGORITHMS))
+        )
+    if algorithm in {"fedavg", "fedprox"}:
+        return {"algorithm_state_required": False}
+
+    history = metrics_payload.get("history")
+    if not isinstance(history, list) or not history:
+        raise RuntimeError("Flower metrics artifact is missing per-round history")
+    rounds = {
+        int(item["round"]): item.get("train", {})
+        for item in history
+        if isinstance(item, dict) and "round" in item
+    }
+    missing_rounds = set(range(1, num_rounds + 1)) - set(rounds)
+    if missing_rounds:
+        raise RuntimeError(
+            f"Flower history is missing rounds {sorted(missing_rounds)}"
+        )
+
+    key, first_round_exempt = {
+        "scaffold": ("scaffold_clients_reporting", False),
+        "moon": ("moon_contrastive_loss", True),
+        "fedbn": ("fedbn_local_bn_tensors", True),
+    }[algorithm]
+
+    checked: list[int] = []
+    for round_number in sorted(rounds):
+        if first_round_exempt and round_number == 1:
+            continue
+        train = rounds[round_number]
+        if not isinstance(train, dict) or key not in train:
+            raise RuntimeError(
+                f"round {round_number} does not record {key!r}; the clients did "
+                f"not apply {algorithm} and the run is plain FedAvg"
+            )
+        value = float(train[key])
+        if algorithm == "scaffold" and value != float(expected_clients):
+            raise RuntimeError(
+                f"round {round_number} has {value} SCAFFOLD clients reporting, "
+                f"expected {expected_clients}"
+            )
+        if value <= 0.0:
+            raise RuntimeError(
+                f"round {round_number} reports {key}={value}, which means "
+                f"{algorithm} had no effect"
+            )
+        checked.append(round_number)
+
+    if not checked:
+        raise RuntimeError(
+            f"no round carried {algorithm} evidence; a single-round run cannot "
+            f"demonstrate {algorithm}"
+        )
+    return {
+        "algorithm_state_required": True,
+        "evidence_key": key,
+        "rounds_verified": checked,
+        "first_round_exempt": first_round_exempt,
+    }
+
+
 def validate_run_artifacts(
     output_dir: Path,
     *,
@@ -80,8 +175,15 @@ def validate_run_artifacts(
     proximal_mu: float,
     log_text: str,
     expected_class_order: Sequence[str],
+    hyperparameters: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """Validate checkpoint, manifest, taxonomy and 4-client Flower evidence."""
+    """Validate checkpoint, manifest, taxonomy and 4-client Flower evidence.
+
+    ``hyperparameters`` are the algorithm-specific values the launcher asked
+    for (``scaffold_server_lr``, ``moon_temperature``, ``moon_mu``).  They are
+    compared against the manifest so a run cannot silently fall back to a
+    default and still be reported as the configured experiment.
+    """
 
     output_dir = output_dir.resolve()
     manifest_path = output_dir / "run_manifest.json"
@@ -104,6 +206,12 @@ def validate_run_artifacts(
         raise RuntimeError(f"Flower run manifest mismatch: {mismatches}")
     if algorithm == "fedprox" and float(manifest.get("proximal_mu", -1.0)) != proximal_mu:
         raise RuntimeError("Flower run manifest has the wrong FedProx proximal_mu")
+    for name, value in (hyperparameters or {}).items():
+        if float(manifest.get(name, float("nan"))) != float(value):
+            raise RuntimeError(
+                f"Flower run manifest {name}={manifest.get(name)!r} does not "
+                f"match the requested {value!r}"
+            )
     resolved_class_order = tuple(expected_class_order)
     if tuple(manifest.get("class_order", resolved_class_order)) != resolved_class_order:
         raise RuntimeError("Flower run manifest has the wrong class order")
@@ -198,6 +306,12 @@ def validate_run_artifacts(
         expected_clients=expected_clients,
         proximal_mu=proximal_mu,
     )
+    algorithm_evidence = algorithm_artifact_evidence(
+        metrics_payload,
+        algorithm=algorithm,
+        expected_clients=expected_clients,
+        num_rounds=num_rounds,
+    )
     warnings: list[str] = []
     if "Windows fatal exception" in normalized_log or "access violation" in normalized_log:
         warnings.append("ray_windows_worker_access_violation_logged")
@@ -218,6 +332,7 @@ def validate_run_artifacts(
         "communication": communication,
         "raw_images_received_by_server": False,
         "evidence": evidence,
+        "algorithm_evidence": algorithm_evidence,
         "warnings": warnings,
     }
 

@@ -9,6 +9,7 @@ from flwr.clientapp import ClientApp
 
 from cropfed.constants import taxonomy_from_scope
 from cropfed.data.torch_data import build_dataloader
+from cropfed.fl.aggregation import batch_norm_parameter_names
 from cropfed.flower.tracking import SCAFFOLD_C_DELTA_RECORD, SCAFFOLD_C_RECORD
 from cropfed.ml.model import build_model
 from cropfed.ml.reporting import flower_evaluation_values
@@ -24,6 +25,8 @@ app = ClientApp()
 #: Client-local state carried between rounds by the Flower runtime.
 MOON_PREVIOUS_MODEL_RECORD = "moon_previous_model"
 SCAFFOLD_CLIENT_C_RECORD = "scaffold_client_c"
+#: FedBN: this client's own batch-norm statistics, never sent to the server.
+FEDBN_LOCAL_BN_RECORD = "fedbn_local_batch_norm"
 
 
 def _client_manifest(context: Context, filename: str) -> Path:
@@ -79,6 +82,7 @@ def train(msg: Message, context: Context) -> Message:
     )
     global_state = msg.content["arrays"].to_torch_state_dict()
     model.load_state_dict(global_state)
+    restored_bn = _restore_local_batch_norm(context, model, algorithm)
     dataloader = build_dataloader(
         _client_manifest(context, "train_manifest.csv"),
         training=True,
@@ -107,6 +111,12 @@ def train(msg: Message, context: Context) -> Message:
         "train_loss": result.loss,
     }
     records: dict[str, object] = {"arrays": ArrayRecord(model.state_dict())}
+
+    if algorithm == "fedbn":
+        # Evidence that this client trained on its *own* BN statistics rather
+        # than the averaged ones. Round 1 legitimately has none stored yet.
+        metrics["fedbn_local_bn_tensors"] = restored_bn
+        _store_local_batch_norm(context, model)
 
     if algorithm == "scaffold":
         if result.scaffold_c_i is None:
@@ -147,6 +157,53 @@ def _store_client_arrays(context: Context, key: str, tensors: dict) -> None:
     """Persist tensors in the client's own state for the next round."""
 
     context.state[key] = ArrayRecord(tensors)
+
+
+def _restore_local_batch_norm(context: Context, model, algorithm: str) -> int:
+    """FedBN: overwrite the averaged BN tensors with this client's own.
+
+    The server aggregates every parameter, so FedBN has to be enforced here:
+    after loading the global weights the client puts its previous local
+    batch-norm statistics back, then trains from those.  Returns how many
+    tensors were restored — zero in round 1, when nothing is stored yet, and
+    the metric the server uses to tell a real FedBN run from plain FedAvg.
+    """
+
+    if algorithm != "fedbn":
+        return 0
+    stored = context.state.array_records.get(FEDBN_LOCAL_BN_RECORD)
+    if stored is None:
+        return 0
+    local_bn = stored.to_torch_state_dict()
+    state = model.state_dict()
+    expected = batch_norm_parameter_names(state)
+    unexpected = set(local_bn) - expected
+    if unexpected:
+        raise RuntimeError(
+            "FedBN client state holds non-batch-norm tensors, first: "
+            f"{sorted(unexpected)[0]!r}"
+        )
+    for name, value in local_bn.items():
+        state[name] = value.to(state[name].dtype)
+    model.load_state_dict(state)
+    return len(local_bn)
+
+
+def _store_local_batch_norm(context: Context, model) -> None:
+    """Keep this client's batch-norm statistics for the next round."""
+
+    state = model.state_dict()
+    names = batch_norm_parameter_names(state)
+    if not names:
+        raise RuntimeError(
+            "algorithm is 'fedbn' but the model has no batch-norm layers; "
+            "the run would be indistinguishable from FedAvg"
+        )
+    _store_client_arrays(
+        context,
+        FEDBN_LOCAL_BN_RECORD,
+        {name: state[name].detach().cpu() for name in sorted(names)},
+    )
 
 
 def _scaffold_previous_c_i(context: Context, model) -> dict:
@@ -245,12 +302,17 @@ def evaluate(msg: Message, context: Context) -> Message:
 
     _set_client_seed(msg, context)
     taxonomy = _resolve_taxonomy(context)
+    algorithm = str(context.run_config.get("algorithm", "fedavg")).lower()
     model = build_model(
         str(context.run_config["model-name"]),
         num_classes=len(taxonomy.class_names),
         pretrained=False,
     )
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    # Under FedBN the client's real model is global weights + its own BN, so
+    # validating the averaged BN would score a model no client ever holds —
+    # and that score is what selects the checkpoint.
+    _restore_local_batch_norm(context, model, algorithm)
     dataloader = build_dataloader(
         _client_manifest(context, "val_manifest.csv"),
         training=False,

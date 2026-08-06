@@ -71,6 +71,35 @@ def _build_strategy(context: Context):
     )
 
 
+def _algorithm_hyperparameters(context: Context) -> dict[str, float]:
+    """Return every algorithm hyperparameter, zero when not applicable.
+
+    Recorded unconditionally in the checkpoint and run manifest: without them a
+    finished ``scaffold`` or ``moon`` artifact cannot be told apart from one run
+    at different settings, which makes the results table unreproducible.
+    """
+
+    algorithm = str(context.run_config["algorithm"]).lower()
+    return {
+        "proximal_mu": (
+            float(context.run_config["proximal-mu"]) if algorithm == "fedprox" else 0.0
+        ),
+        "scaffold_server_lr": (
+            float(context.run_config.get("scaffold-server-lr", 1.0))
+            if algorithm == "scaffold"
+            else 0.0
+        ),
+        "moon_temperature": (
+            float(context.run_config.get("moon-temperature", 0.5))
+            if algorithm == "moon"
+            else 0.0
+        ),
+        "moon_mu": (
+            float(context.run_config.get("moon-mu", 1.0)) if algorithm == "moon" else 0.0
+        ),
+    }
+
+
 @app.main()
 def main(grid: Grid, context: Context) -> None:
     """Run the configured cross-silo federation."""
@@ -128,26 +157,7 @@ def main(grid: Grid, context: Context) -> None:
                 "batch_size": int(context.run_config["batch-size"]),
                 "learning_rate": float(context.run_config["learning-rate"]),
                 "pretrained": bool(context.run_config["pretrained"]),
-                "proximal_mu": (
-                    float(context.run_config["proximal-mu"])
-                    if algorithm == "fedprox"
-                    else 0.0
-                ),
-                "scaffold_server_lr": (
-                    float(context.run_config.get("scaffold-server-lr", 1.0))
-                    if algorithm == "scaffold"
-                    else 0.0
-                ),
-                "moon_temperature": (
-                    float(context.run_config.get("moon-temperature", 0.5))
-                    if algorithm == "moon"
-                    else 0.0
-                ),
-                "moon_mu": (
-                    float(context.run_config.get("moon-mu", 1.0))
-                    if algorithm == "moon"
-                    else 0.0
-                ),
+                **_algorithm_hyperparameters(context),
             },
             manifest_hashes={
                 "global_test_sha256": file_sha256(global_test_manifest),
@@ -233,11 +243,7 @@ def main(grid: Grid, context: Context) -> None:
                 "research_result_valid": research_result_valid,
                 "protocol_lock": protocol_validation,
                 "best_validation_round": strategy.best_validation_round,
-                "proximal_mu": (
-                    float(context.run_config["proximal-mu"])
-                    if str(context.run_config["algorithm"]).lower() == "fedprox"
-                    else 0.0
-                ),
+                **_algorithm_hyperparameters(context),
             },
             class_order=taxonomy.class_names,
         )
@@ -299,11 +305,7 @@ def main(grid: Grid, context: Context) -> None:
                     "learning_rate": float(context.run_config["learning-rate"]),
                     "seed": seed,
                     "pretrained": bool(context.run_config["pretrained"]),
-                    "proximal_mu": (
-                        float(context.run_config["proximal-mu"])
-                        if str(context.run_config["algorithm"]).lower() == "fedprox"
-                        else 0.0
-                    ),
+                    **_algorithm_hyperparameters(context),
                     "taxonomy_scope": taxonomy.scope,
                     "class_order": list(taxonomy.class_names),
                     "model": str(context.run_config["model-name"]),

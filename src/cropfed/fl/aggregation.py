@@ -10,7 +10,7 @@ Implements the aggregation side of:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -90,6 +90,19 @@ def _identify_batch_norm_parameter_prefixes(keys: set[str]) -> set[str]:
                 bn_prefixes.add(prefix)
                 break
     return bn_prefixes
+
+
+def batch_norm_parameter_names(keys: Iterable[str]) -> set[str]:
+    """Return the subset of *keys* that belong to BatchNorm layers.
+
+    Shared by the smoke simulator's aggregation and the real Flower client so
+    both agree on exactly which tensors FedBN keeps local.  A disagreement here
+    would make ``fedbn`` mean two different things in the same thesis.
+    """
+
+    key_set = set(keys)
+    bn_prefixes = _identify_batch_norm_parameter_prefixes(key_set)
+    return {name for name in key_set if _is_batch_norm_parameter(name, bn_prefixes)}
 
 
 def _is_batch_norm_parameter(name: str, bn_prefixes: set[str]) -> bool:
