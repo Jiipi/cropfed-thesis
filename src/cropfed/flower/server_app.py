@@ -6,16 +6,24 @@ import json
 import time
 from pathlib import Path
 
-from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
+from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
 
-from cropfed.constants import TOMATO_CLASSES
+from cropfed.constants import taxonomy_from_scope
 from cropfed.data.torch_data import build_dataloader
 from cropfed.experiments.artifacts import (
+    file_sha256,
     prepare_new_output_directory,
     write_environment_artifact,
 )
-from cropfed.flower.tracking import TrackedFedAvg, TrackedFedProx
+from cropfed.experiments.protocol import validate_protocol_lock
+from cropfed.flower.tracking import (
+    TrackedFedAvg,
+    TrackedFedBN,
+    TrackedFedProx,
+    TrackedMOON,
+    TrackedSCAFFOLD,
+)
 from cropfed.ml.checkpoint import save_model_checkpoint
 from cropfed.ml.model import build_model
 from cropfed.ml.reporting import flower_evaluation_values
@@ -41,7 +49,26 @@ def _build_strategy(context: Context):
             **common,
             proximal_mu=float(context.run_config["proximal-mu"]),
         )
-    raise ValueError("algorithm must be 'fedavg' or 'fedprox'")
+    if algorithm == "fedbn":
+        return TrackedFedBN(**common)
+    if algorithm == "scaffold":
+        return TrackedSCAFFOLD(
+            **common,
+            scaffold_server_lr=float(
+                context.run_config.get("scaffold-server-lr", 1.0)
+            ),
+        )
+    if algorithm == "moon":
+        return TrackedMOON(
+            **common,
+            moon_temperature=float(
+                context.run_config.get("moon-temperature", 0.5)
+            ),
+            moon_mu=float(context.run_config.get("moon-mu", 1.0)),
+        )
+    raise ValueError(
+        "algorithm must be 'fedavg', 'fedprox', 'fedbn', 'scaffold', or 'moon'"
+    )
 
 
 @app.main()
@@ -49,13 +76,89 @@ def main(grid: Grid, context: Context) -> None:
     """Run the configured cross-silo federation."""
 
     seed = int(context.run_config["seed"])
+    scope = context.run_config.get("taxonomy-scope")
+    if not scope:
+        raise KeyError(
+            "run_config is missing 'taxonomy-scope'; set it in "
+            "[tool.flwr.app.config] or pass it from the run launcher"
+        )
+    taxonomy = taxonomy_from_scope(str(scope))
     save_model = bool(context.run_config["save-model"])
-    result_kind = str(
+    configured_result_kind = str(
         context.run_config.get("result-kind", "federated_image_unclassified")
     )
     research_result_valid = bool(
         context.run_config.get("research-result-valid", False)
     )
+    result_kind = (
+        "federated_image_research_candidate"
+        if research_result_valid
+        else configured_result_kind
+    )
+    global_test_manifest = Path(
+        str(
+            context.run_config.get(
+                "global-test-manifest",
+                context.run_config.get("central-test-manifest", ""),
+            )
+        )
+    )
+    if not global_test_manifest.is_file():
+        raise FileNotFoundError(
+            f"global test manifest does not exist: {global_test_manifest}"
+        )
+    algorithm = str(context.run_config["algorithm"]).lower()
+    partition_summary = (
+        Path(str(context.run_config["client-data-root"])) / "partition_summary.json"
+    )
+    protocol_validation = None
+    if research_result_valid:
+        lock_value = str(context.run_config.get("protocol-lock", "")).strip()
+        protocol_validation = validate_protocol_lock(
+            Path(lock_value) if lock_value else None,
+            experiment_type="federated",
+            config={
+                "algorithm": algorithm,
+                "partition_kind": str(context.run_config["partition-kind"]),
+                "dirichlet_alpha": float(context.run_config["dirichlet-alpha"]),
+                "model": str(context.run_config["model-name"]),
+                "num_clients": int(context.run_config["num-clients"]),
+                "num_rounds": int(context.run_config["num-server-rounds"]),
+                "local_epochs": int(context.run_config["local-epochs"]),
+                "batch_size": int(context.run_config["batch-size"]),
+                "learning_rate": float(context.run_config["learning-rate"]),
+                "pretrained": bool(context.run_config["pretrained"]),
+                "proximal_mu": (
+                    float(context.run_config["proximal-mu"])
+                    if algorithm == "fedprox"
+                    else 0.0
+                ),
+                "scaffold_server_lr": (
+                    float(context.run_config.get("scaffold-server-lr", 1.0))
+                    if algorithm == "scaffold"
+                    else 0.0
+                ),
+                "moon_temperature": (
+                    float(context.run_config.get("moon-temperature", 0.5))
+                    if algorithm == "moon"
+                    else 0.0
+                ),
+                "moon_mu": (
+                    float(context.run_config.get("moon-mu", 1.0))
+                    if algorithm == "moon"
+                    else 0.0
+                ),
+            },
+            manifest_hashes={
+                "global_test_sha256": file_sha256(global_test_manifest),
+                "partition_summary_sha256": (
+                    file_sha256(partition_summary)
+                    if partition_summary.is_file()
+                    else None
+                ),
+            },
+            seed=seed,
+        )
     output_dir = (
         prepare_new_output_directory(Path(str(context.run_config["output-dir"])))
         if save_model
@@ -64,17 +167,11 @@ def main(grid: Grid, context: Context) -> None:
     set_reproducible_seed(seed)
     model = build_model(
         str(context.run_config["model-name"]),
-        num_classes=len(TOMATO_CLASSES),
+        num_classes=len(taxonomy.class_names),
         pretrained=bool(context.run_config["pretrained"]),
     )
     initial_arrays = ArrayRecord(model.state_dict())
     strategy = _build_strategy(context)
-    central_manifest = Path(str(context.run_config["central-test-manifest"]))
-    evaluate_fn = (
-        _central_evaluate_fn(context, central_manifest)
-        if central_manifest.is_file()
-        else None
-    )
 
     strategy_started = time.perf_counter()
     result = strategy.start(
@@ -84,14 +181,37 @@ def main(grid: Grid, context: Context) -> None:
             {"lr": float(context.run_config["learning-rate"])}
         ),
         num_rounds=int(context.run_config["num-server-rounds"]),
-        evaluate_fn=evaluate_fn,
     )
     strategy_elapsed_seconds = time.perf_counter() - strategy_started
+
+    if strategy.best_state_dict is None or strategy.best_validation_round is None:
+        raise RuntimeError(
+            "Flower produced no validation-selected checkpoint; "
+            "client evaluation must run after every training round"
+        )
+    model.load_state_dict(strategy.best_state_dict)
+    global_test_started = time.perf_counter()
+    global_test = _evaluate_manifest(
+        context,
+        model,
+        global_test_manifest,
+        class_names=taxonomy.class_names,
+        class_groups=taxonomy.class_groups,
+    )
+    global_test_elapsed_seconds = time.perf_counter() - global_test_started
+    global_test_metrics = {
+        "global_test_evaluation_seconds": global_test_elapsed_seconds,
+        **flower_evaluation_values(
+            global_test,
+            prefix="global_test",
+            detailed=True,
+            class_names=taxonomy.class_names,
+        ),
+    }
 
     if save_model:
         assert output_dir is not None
         checkpoint_path = output_dir / "global_model.pt"
-        model.load_state_dict(result.arrays.to_torch_state_dict())
         checkpoint_info = save_model_checkpoint(
             checkpoint_path,
             model,
@@ -99,6 +219,7 @@ def main(grid: Grid, context: Context) -> None:
             metadata={
                 "experiment_type": "federated",
                 "algorithm": str(context.run_config["algorithm"]),
+                "taxonomy_scope": taxonomy.scope,
                 "partition_kind": str(context.run_config["partition-kind"]),
                 "dirichlet_alpha": float(context.run_config["dirichlet-alpha"]),
                 "num_clients": int(context.run_config["num-clients"]),
@@ -110,12 +231,15 @@ def main(grid: Grid, context: Context) -> None:
                 "pretrained": bool(context.run_config["pretrained"]),
                 "result_kind": result_kind,
                 "research_result_valid": research_result_valid,
+                "protocol_lock": protocol_validation,
+                "best_validation_round": strategy.best_validation_round,
                 "proximal_mu": (
                     float(context.run_config["proximal-mu"])
                     if str(context.run_config["algorithm"]).lower() == "fedprox"
                     else 0.0
                 ),
             },
+            class_order=taxonomy.class_names,
         )
         history = _result_history(result)
         client_history = sorted(
@@ -135,6 +259,13 @@ def main(grid: Grid, context: Context) -> None:
                     "client_history": client_history,
                     "communication": communication,
                     "strategy_elapsed_seconds": strategy_elapsed_seconds,
+                    "selection": {
+                        "criterion": "federated_validation_macro_f1",
+                        "tie_breaker": "federated_validation_loss",
+                        "best_round": strategy.best_validation_round,
+                        "validation_metrics": strategy.best_validation_metrics,
+                    },
+                    "global_test": global_test_metrics,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -152,6 +283,7 @@ def main(grid: Grid, context: Context) -> None:
                 {
                     "result_kind": result_kind,
                     "research_result_valid": research_result_valid,
+                    "protocol_lock": protocol_validation,
                     "research_validation_status": (
                         "validated_research_candidate"
                         if research_result_valid
@@ -172,7 +304,8 @@ def main(grid: Grid, context: Context) -> None:
                         if str(context.run_config["algorithm"]).lower() == "fedprox"
                         else 0.0
                     ),
-                    "class_order": list(TOMATO_CLASSES),
+                    "taxonomy_scope": taxonomy.scope,
+                    "class_order": list(taxonomy.class_names),
                     "model": str(context.run_config["model-name"]),
                     "checkpoint": checkpoint_path.name,
                     "checkpoint_sha256": checkpoint_info["sha256"],
@@ -186,6 +319,14 @@ def main(grid: Grid, context: Context) -> None:
                     "client_history_entries": len(client_history),
                     "communication": communication,
                     "strategy_elapsed_seconds": strategy_elapsed_seconds,
+                    "best_validation_round": strategy.best_validation_round,
+                    "validation_selection": {
+                        "criterion": "federated_validation_macro_f1",
+                        "tie_breaker": "federated_validation_loss",
+                        "metrics": strategy.best_validation_metrics,
+                    },
+                    "global_test_evaluated_once_after_selection": True,
+                    "global_test_metrics": global_test_metrics,
                     "raw_images_received_by_server": False,
                 },
                 indent=2,
@@ -280,31 +421,23 @@ def _communication_summary(history: list[dict[str, object]]) -> dict[str, int | 
     return totals
 
 
-def _central_evaluate_fn(context: Context, manifest_path: Path):
-    def evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
-        started = time.perf_counter()
-        model = build_model(
-            str(context.run_config["model-name"]),
-            num_classes=len(TOMATO_CLASSES),
-            pretrained=False,
-        )
-        model.load_state_dict(arrays.to_torch_state_dict())
-        dataloader = build_dataloader(
-            manifest_path,
-            training=False,
-            batch_size=int(context.run_config["batch-size"]),
-        )
-        result = evaluate_model(model, dataloader, device=select_device())
-        return MetricRecord(
-            {
-                "server_round": server_round,
-                "central_evaluation_seconds": time.perf_counter() - started,
-                **flower_evaluation_values(
-                    result,
-                    prefix="central",
-                    detailed=True,
-                ),
-            }
-        )
-
-    return evaluate
+def _evaluate_manifest(
+    context: Context,
+    model,
+    manifest_path: Path,
+    *,
+    class_names,
+    class_groups,
+):
+    dataloader = build_dataloader(
+        manifest_path,
+        training=False,
+        batch_size=int(context.run_config["batch-size"]),
+    )
+    return evaluate_model(
+        model,
+        dataloader,
+        device=select_device(),
+        class_names=class_names,
+        class_groups=class_groups,
+    )

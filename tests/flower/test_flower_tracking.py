@@ -210,6 +210,32 @@ class FlowerTrackingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "received 1/2 valid replies"):
             strategy.aggregate_train(1, [only_reply])
 
+    def test_best_checkpoint_uses_validation_f1_then_loss(self) -> None:
+        import torch
+        from flwr.app import MetricRecord
+
+        from cropfed.flower.tracking import TrackedFedAvg
+
+        strategy = TrackedFedAvg()
+        for round_number, weight, macro_f1, loss in (
+            (1, 1.0, 0.7, 0.8),
+            (2, 2.0, 0.6, 0.1),
+            (3, 3.0, 0.7, 0.5),
+        ):
+            strategy._pending_round_state[round_number] = {
+                "weight": torch.tensor([weight])
+            }
+            strategy._consider_validation_checkpoint(
+                round_number,
+                MetricRecord(
+                    {"eval_macro_f1": macro_f1, "eval_loss": loss}
+                ),
+            )
+
+        self.assertEqual(strategy.best_validation_round, 3)
+        assert strategy.best_state_dict is not None
+        self.assertEqual(float(strategy.best_state_dict["weight"][0]), 3.0)
+
 
 if __name__ == "__main__":
     unittest.main()

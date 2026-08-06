@@ -16,10 +16,20 @@ data/raw/
 data/processed/
 data/clients/
 data/flower-profiles/
+# Partition artifacts embed absolute local paths and run to hundreds of MB.
+# They are reproducible from the dataset with `cropfed prepare-full-profiles`
+# and `cropfed extend-full-profiles` at the recorded seed, so they stay out of
+# git (D-013: size and data-boundary reasons).
+data/flower-profiles-full/
+data/flower-profiles-full.partial-*/
+tmp/
 secrets/
 certificates/
 artifacts/*
 !artifacts/.gitkeep
+
+# Thesis PDFs are large binaries kept outside version control.
+*.pdf
 
 frontend/node_modules/
 frontend/dist/

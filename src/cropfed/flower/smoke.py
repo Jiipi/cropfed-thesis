@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from cropfed.constants import TOMATO_CLASSES
 from cropfed.ml.checkpoint import load_model_checkpoint
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -79,6 +79,7 @@ def validate_run_artifacts(
     expected_clients: int,
     proximal_mu: float,
     log_text: str,
+    expected_class_order: Sequence[str],
 ) -> dict[str, Any]:
     """Validate checkpoint, manifest, taxonomy and 4-client Flower evidence."""
 
@@ -103,7 +104,8 @@ def validate_run_artifacts(
         raise RuntimeError(f"Flower run manifest mismatch: {mismatches}")
     if algorithm == "fedprox" and float(manifest.get("proximal_mu", -1.0)) != proximal_mu:
         raise RuntimeError("Flower run manifest has the wrong FedProx proximal_mu")
-    if tuple(manifest.get("class_order", TOMATO_CLASSES)) != TOMATO_CLASSES:
+    resolved_class_order = tuple(expected_class_order)
+    if tuple(manifest.get("class_order", resolved_class_order)) != resolved_class_order:
         raise RuntimeError("Flower run manifest has the wrong class order")
 
     checkpoint_value = Path(str(manifest["checkpoint"]))
@@ -121,6 +123,8 @@ def validate_run_artifacts(
         raise RuntimeError("Flower checkpoint size does not match its run manifest")
 
     loaded = load_model_checkpoint(checkpoint_path)
+    if loaded.class_order != resolved_class_order:
+        raise RuntimeError("checkpoint class order does not match the run manifest")
     if loaded.metadata.get("algorithm") != algorithm:
         raise RuntimeError("checkpoint metadata algorithm does not match the run")
     if loaded.metadata.get("num_clients") != expected_clients:
@@ -139,10 +143,29 @@ def validate_run_artifacts(
     if environment_path.stat().st_size != int(environment.get("bytes", -1)):
         raise RuntimeError("Flower environment size does not match its run manifest")
     metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    num_rounds = int(manifest.get("num_rounds", 0))
+    selection = metrics_payload.get("selection")
+    if not isinstance(selection, dict):
+        raise RuntimeError("Flower metrics artifact is missing validation selection")
+    best_round = selection.get("best_round")
+    if (
+        isinstance(best_round, bool)
+        or not isinstance(best_round, int)
+        or not 1 <= best_round <= num_rounds
+    ):
+        raise RuntimeError("Flower validation-selected round is invalid")
+    if loaded.metadata.get("best_validation_round") != best_round:
+        raise RuntimeError("checkpoint best round does not match validation selection")
+    global_test = metrics_payload.get("global_test")
+    if not isinstance(global_test, dict) or not isinstance(
+        global_test.get("global_test_macro_f1"), int | float
+    ):
+        raise RuntimeError("Flower metrics artifact is missing final global test")
+    if manifest.get("global_test_evaluated_once_after_selection") is not True:
+        raise RuntimeError("Flower run manifest does not confirm one-shot global test")
     client_history = metrics_payload.get("client_history")
     if not isinstance(client_history, list):
         raise RuntimeError("Flower metrics artifact is missing client_history")
-    num_rounds = int(manifest.get("num_rounds", 0))
     expected_history_entries = expected_clients * num_rounds * 2
     identities = {
         (int(item["round"]), int(item["client_id"]), str(item["phase"]))

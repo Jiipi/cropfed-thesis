@@ -5,6 +5,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from cropfed.constants import TOMATO_CLASS_GROUPS, TOMATO_CLASSES
+
 TORCH_RUNTIME_AVAILABLE = all(
     importlib.util.find_spec(name) is not None
     for name in ("torch", "torchvision")
@@ -67,6 +69,8 @@ class TorchRuntimeTests(unittest.TestCase):
             model,
             loader,
             device=torch.device("cpu"),
+            class_names=TOMATO_CLASSES,
+            class_groups=TOMATO_CLASS_GROUPS,
         )
 
         self.assertEqual(training.num_examples, 20)
@@ -74,6 +78,53 @@ class TorchRuntimeTests(unittest.TestCase):
         self.assertEqual(evaluation.num_examples, 20)
         self.assertIn("macro_f1", evaluation.metrics)
         self.assertEqual(len(evaluation.metrics["confusion_matrix"]), 10)
+
+    def test_validation_training_restores_selected_epoch(self) -> None:
+        import torch
+        from torch.utils.data import DataLoader, TensorDataset
+
+        from cropfed.ml.trainer import evaluate_model, train_with_validation
+
+        torch.manual_seed(7)
+        features = torch.randn(30, 4)
+        labels = torch.arange(30) % 10
+        train_loader = DataLoader(
+            TensorDataset(features[:20], labels[:20]),
+            batch_size=5,
+            shuffle=False,
+        )
+        validation_loader = DataLoader(
+            TensorDataset(features[20:], labels[20:]),
+            batch_size=5,
+            shuffle=False,
+        )
+        model = torch.nn.Linear(4, 10)
+
+        result = train_with_validation(
+            model,
+            train_loader,
+            validation_loader,
+            epochs=3,
+            learning_rate=0.01,
+            device=torch.device("cpu"),
+            class_names=TOMATO_CLASSES,
+            class_groups=TOMATO_CLASS_GROUPS,
+        )
+        restored = evaluate_model(
+            model,
+            validation_loader,
+            device=torch.device("cpu"),
+            class_names=TOMATO_CLASSES,
+            class_groups=TOMATO_CLASS_GROUPS,
+        )
+
+        self.assertEqual(len(result.history), 3)
+        self.assertIn(result.best_epoch, {1, 2, 3})
+        self.assertAlmostEqual(
+            restored.metrics["macro_f1"],
+            result.best_validation.metrics["macro_f1"],
+        )
+        self.assertAlmostEqual(restored.loss, result.best_validation.loss)
 
     def test_versioned_checkpoint_and_local_inference(self) -> None:
         from cropfed.ml.checkpoint import (
@@ -95,6 +146,7 @@ class TorchRuntimeTests(unittest.TestCase):
                 model,
                 model_name="mobilenet_v2",
                 metadata={"seed": 2026, "experiment_type": "tiny-runtime-test"},
+                class_order=TOMATO_CLASSES,
             )
 
             loaded = load_model_checkpoint(checkpoint)
@@ -133,8 +185,12 @@ class TorchRuntimeTests(unittest.TestCase):
             second.load_state_dict(first.state_dict())
             with torch.no_grad():
                 second.weight[0, 0] += 0.25
-            save_model_checkpoint(first_path, first, model_name="tiny")
-            save_model_checkpoint(second_path, second, model_name="tiny")
+            save_model_checkpoint(
+                first_path, first, model_name="tiny", class_order=TOMATO_CLASSES
+            )
+            save_model_checkpoint(
+                second_path, second, model_name="tiny", class_order=TOMATO_CLASSES
+            )
 
             comparison = compare_checkpoint_states(first_path, second_path)
 
