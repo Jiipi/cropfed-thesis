@@ -24,20 +24,25 @@ Phiên bản `0.1.0` là nền móng chạy được để bắt đầu code mà
   checkpoint/inference hợp lệ nhưng artifact được đánh dấu pilot-only.
 - Local-only α=0.5 pilot đã hoàn tất đủ bốn client; mean/worst global Macro-F1 cùng
   bốn checkpoint được lưu nhưng vẫn bị loại khỏi research export.
+- Flower FedAvg IID PlantVillage pilot một round đã hoàn tất đủ 4/4 train và
+  evaluate reply, central Macro-F1 0,9145; checkpoint/environment hash hợp lệ và
+  artifact vẫn bị loại khỏi research export.
 - FastAPI + PostgreSQL lưu metadata, scalar metric theo round và metric theo từng client; worker riêng claim Flower job bằng cấu hình/profile dữ liệu đã whitelist.
 - Flower ghi thời gian, payload/model upload/download thực theo từng phase/client; phép đo loại trừ framing mạng và TLS overhead.
 - React dashboard tạo synthetic/Flower job, đọc metric có cấu trúc, vẽ Macro-F1, confusion matrix và heatmap phân bố lớp/client mà không đọc ảnh/path cục bộ.
-- Exporter sinh bảng comparison/per-class/confusion cùng environment/checksum và luôn loại smoke tổng hợp.
+- Exporter sinh bảng comparison/per-class/confusion cùng environment/checksum và
+  luôn loại smoke tổng hợp hoặc run có `research_result_valid=false`.
 - Docker Compose cho web/API/database và Flower worker tùy chọn; entrypoint web dùng
   HTTPS, API dùng bearer token phân quyền `viewer`/`admin`.
-- 58 kiểm thử tự động, Torch CPU runtime, baseline ảnh, Flower 4-client smoke,
+- 60 kiểm thử tự động + 2 subtest, Torch CPU runtime, baseline ảnh, Flower 4-client smoke,
   API-worker smoke, Compose healthcheck và frontend production build đã đạt ở các
   lần kiểm chứng.
 
 > **Cảnh báo khoa học:** kết quả trong `artifacts/smoke-result.json` và fixture do
-> `run_flower_smoke.py` tạo là dữ liệu tổng hợp. Centralized PlantVillage một epoch
-> cũng chỉ là pilot. Tất cả đều khóa `research_result_valid=false`; tuyệt đối không
-> dùng các metric này làm kết quả nghiên cứu chính.
+> `run_flower_smoke.py` tạo là dữ liệu tổng hợp. Centralized, local-only α=0.5 và
+> Flower FedAvg IID PlantVillage một epoch/round cũng chỉ là pilot. Tất cả đều khóa
+> `research_result_valid=false`; tuyệt đối không dùng các metric này làm kết quả
+> nghiên cứu chính.
 
 ## Bắt đầu nhanh
 
@@ -215,6 +220,13 @@ flwr run . local --stream \
   --run-config \
   "algorithm='fedavg' num-server-rounds=30 local-epochs=1 batch-size=32 learning-rate=0.001 seed=2026 client-data-root='data/flower-profiles/dirichlet-alpha-0.5/clients' central-test-manifest='data/flower-profiles/dirichlet-alpha-0.5/test_manifest.csv' output-dir='artifacts/flower/fedavg-alpha-0.5-seed-2026'"
 ```
+
+Trên Windows/Ray 2.55.1, pilot PlantVillage với bốn actor song song đã gặp
+`ActorDiedError`. Cấu hình local đã kiểm chứng dùng một actor/8 CPU bằng
+`client-resources-num-cpus=8 init-args-num-cpus=8`; bốn SuperNode vẫn được giữ và
+được xử lý tuần tự. Ray có thể in trace `access violation` từ worker phụ nhưng run
+chỉ được coi là đạt khi đủ 4/4 train/evaluate reply, 0 failure và hash artifact
+khớp. Main study nên ưu tiên Linux.
 
 Để chạy FedProx:
 

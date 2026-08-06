@@ -10,7 +10,8 @@ from sqlmodel import create_engine
 
 from cropfed.api.main import create_app
 from cropfed.api.settings import Settings
-from cropfed.constants import OFFICIAL_TITLE, TOMATO_CLASSES
+from cropfed.constants import OFFICIAL_TITLE, TOMATO_CLASSES, taxonomy_from_scope
+from cropfed.data.profiles import FULL_PROFILE_SPECS, MVP_PROFILE_SPECS
 
 
 def make_test_engine():
@@ -54,17 +55,50 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(project.status_code, 200)
         self.assertEqual(project.json()["official_title"], OFFICIAL_TITLE)
         self.assertEqual(classes.status_code, 200)
-        self.assertEqual(classes.json()["count"], 10)
+        # Assert against the configured scope rather than a literal count, so
+        # this contract test follows the taxonomy instead of pinning it.
+        taxonomy = taxonomy_from_scope(self.settings.taxonomy_scope)
+        self.assertEqual(classes.json()["count"], len(taxonomy.class_names))
         self.assertEqual(
             [item["name"] for item in classes.json()["items"]],
-            list(TOMATO_CLASSES),
+            list(taxonomy.class_names),
         )
-        self.assertEqual(classes.json()["items"][-1]["group"], "pest")
+        self.assertEqual(
+            [item["group"] for item in classes.json()["items"]],
+            list(taxonomy.class_groups),
+        )
         profiles = self.client.get("/api/v1/data-profiles")
         self.assertEqual(profiles.status_code, 200)
-        self.assertEqual(len(profiles.json()["items"]), 3)
+        self.assertEqual(len(profiles.json()["items"]), len(FULL_PROFILE_SPECS))
         self.assertFalse(any(item["available"] for item in profiles.json()["items"]))
         self.assertFalse(profiles.json()["privacy"]["contains_image_bytes"])
+
+    def test_default_scope_is_the_38_class_main_study_taxonomy(self) -> None:
+        """The dataclass default and load_settings() must not disagree.
+
+        They previously did (``tomato`` vs ``plantvillage-full``), so tests
+        silently exercised a different taxonomy than production.
+        """
+
+        self.assertEqual(self.settings.taxonomy_scope, "plantvillage-full")
+        self.assertEqual(self.client.get("/api/v1/classes").json()["count"], 38)
+
+    def test_tomato_scope_still_serves_the_pilot_taxonomy(self) -> None:
+        """Tier-1 pilot artefacts must stay readable under the legacy scope."""
+
+        engine = make_test_engine()
+        settings = replace(self.settings, taxonomy_scope="tomato")
+        with TestClient(
+            create_app(database_engine=engine, application_settings=settings)
+        ) as client:
+            classes = client.get("/api/v1/classes").json()
+            self.assertEqual(classes["count"], 10)
+            self.assertEqual(
+                [item["name"] for item in classes["items"]], list(TOMATO_CLASSES)
+            )
+            profiles = client.get("/api/v1/data-profiles").json()
+            self.assertEqual(len(profiles["items"]), len(MVP_PROFILE_SPECS))
+        engine.dispose()
 
     def test_bearer_auth_enforces_viewer_and_admin_roles(self) -> None:
         admin_token = "admin-token-" + ("a" * 40)
@@ -131,6 +165,11 @@ class ApiIntegrationTests(unittest.TestCase):
             )
 
     def test_data_profile_endpoint_returns_counts_without_paths(self) -> None:
+        # Derive the fixture width from the configured scope; a literal class
+        # count here silently stops exercising the endpoint once the taxonomy
+        # changes, because a width mismatch is reported as `available: False`.
+        num_classes = len(taxonomy_from_scope(self.settings.taxonomy_scope).class_names)
+        num_samples = 2 * num_classes
         with tempfile.TemporaryDirectory() as directory:
             project_root = Path(directory)
             summary = {
@@ -141,11 +180,11 @@ class ApiIntegrationTests(unittest.TestCase):
                 "clients": [
                     {
                         "client_id": client_id,
-                        "num_samples": 20,
-                        "num_train": 16,
+                        "num_samples": num_samples,
+                        "num_train": num_samples - 4,
                         "num_validation": 4,
-                        "class_counts": [2] * 10,
-                        "class_proportions": [0.1] * 10,
+                        "class_counts": [2] * num_classes,
+                        "class_proportions": [2 / num_samples] * num_classes,
                     }
                     for client_id in range(4)
                 ],
@@ -175,8 +214,10 @@ class ApiIntegrationTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["items"][0]["available"])
-        self.assertEqual(payload["items"][0]["num_samples"], 80)
-        self.assertEqual(payload["items"][0]["clients"][0]["class_counts"], [2] * 10)
+        self.assertEqual(payload["items"][0]["num_samples"], 4 * num_samples)
+        self.assertEqual(
+            payload["items"][0]["clients"][0]["class_counts"], [2] * num_classes
+        )
         self.assertNotIn(str(project_root), response.text)
 
     def test_synthetic_experiment_lifecycle_and_rounds(self) -> None:

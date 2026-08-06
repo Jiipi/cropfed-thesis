@@ -482,3 +482,179 @@ button.secondary {
     padding: 20px;
   }
 }
+
+/* Tab Navigation */
+.tab-bar {
+  display: flex;
+  gap: 8px;
+  margin: 28px 0 16px;
+  border-bottom: 2px solid #cbd5c7;
+  padding-bottom: 8px;
+  overflow-x: auto;
+}
+
+.tab-bar button {
+  background: transparent;
+  color: #4b5c50;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-weight: 700;
+  font-size: 0.88rem;
+  transition: all 0.15s ease;
+}
+
+.tab-bar button:hover {
+  background: rgba(102, 139, 86, 0.12);
+  color: #315b38;
+}
+
+.tab-bar button.tab-active {
+  background: #315b38;
+  color: white;
+}
+
+.tab-section {
+  margin-top: 16px;
+}
+
+/* Data Table */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 0.82rem;
+}
+
+.data-table th,
+.data-table td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid #dce3d8;
+}
+
+.data-table th {
+  background: #edf2e9;
+  color: #35443a;
+  font-weight: 700;
+}
+
+.data-table tr:hover {
+  background: #f4f7f2;
+}
+
+/* Client Management */
+.client-form {
+  margin-bottom: 24px;
+  padding: 16px;
+  border: 1px dashed #cbd5c7;
+  border-radius: 12px;
+  background: #f7f9f5;
+}
+
+.client-form h3 {
+  margin-bottom: 12px;
+  font-size: 1.05rem;
+}
+
+/* Privacy Banner */
+.privacy-banner {
+  margin-bottom: 20px;
+  padding: 14px 18px;
+  border-left: 4px solid #d97706;
+  background: #fef3c7;
+  border-radius: 0 8px 8px 0;
+  color: #78350f;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.privacy-banner p {
+  margin: 6px 0 0;
+}
+
+/* Prediction Panel */
+.predict-form {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.image-preview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px;
+  border: 1px solid #cbd5c7;
+  border-radius: 8px;
+  background: #f7f9f5;
+}
+
+.image-preview img {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.predict-result {
+  margin-top: 20px;
+}
+
+.tag-success {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.disclaimer-note {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-top: 1px solid #dce3d8;
+  color: #6b7280;
+  font-size: 0.78rem;
+}
+
+/* Comparison Bar & Selection */
+.compare-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.experiment-selected {
+  border-color: #315b38;
+  box-shadow: 0 0 0 2px rgba(49, 91, 56, 0.2);
+}
+
+.export-bar {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+  justify-content: flex-end;
+}
+
+/* Client F1 Bar */
+.client-f1-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #dce3d8;
+  font-size: 0.75rem;
+  color: #526057;
+}
+
+.client-f1-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: #eef2e9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}

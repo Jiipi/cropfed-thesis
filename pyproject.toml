@@ -20,8 +20,10 @@ dependencies = [
 
 [project.optional-dependencies]
 api = [
+  "alembic>=1.16,<2",
   "fastapi>=0.116,<1",
   "psycopg[binary]>=3.2,<4",
+  "python-multipart>=0.0.20,<1",
   "sqlmodel>=0.0.24,<1",
   "uvicorn[standard]>=0.35,<1",
 ]
@@ -57,16 +59,21 @@ learning-rate = 0.001
 seed = 2026
 algorithm = "fedavg"
 proximal-mu = 0.01
+scaffold-server-lr = 1.0
+moon-temperature = 0.5
+moon-mu = 1.0
 partition-kind = "dirichlet"
 dirichlet-alpha = 0.5
-model-name = "mobilenet_v2"
+model-name = "mobilenet_v3_small"
 pretrained = true
-client-data-root = "./data/clients"
-central-test-manifest = "./data/processed/test_manifest.csv"
+taxonomy-scope = "plantvillage-full"
+client-data-root = "./data/flower-profiles-full/iid/clients"
+global-test-manifest = "./data/flower-profiles-full/iid/test_manifest.csv"
 save-model = true
 output-dir = "./artifacts/flower"
 result-kind = "federated_image_pilot"
 research-result-valid = false
+protocol-lock = ""
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

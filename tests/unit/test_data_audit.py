@@ -42,12 +42,26 @@ class DataAuditTests(unittest.TestCase):
         self.assertTrue(report["images"]["invalid_images"])
         self.assertNotIn(str(paths["root"]), str(report))
 
+    def test_duplicate_content_across_local_train_and_validation_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self._write_valid_prepared_data(Path(directory))
+            paths["train_images"][8].write_bytes(
+                paths["train_images"][0].read_bytes()
+            )
+            report = self._audit(paths)
+
+        codes = {issue["code"] for issue in report["errors"]}
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("client_train_validation_content_overlap", codes)
+        self.assertIn("duplicate_content_assigned_to_multiple_client_scopes", codes)
+
     def _audit(self, paths):
         return audit_prepared_data(
             train_manifest=paths["train_manifest"],
             test_manifest=paths["test_manifest"],
             client_data_root=paths["client_root"],
             num_clients=4,
+            class_names=TOMATO_CLASSES,
         )
 
     def _write_valid_prepared_data(self, root: Path):

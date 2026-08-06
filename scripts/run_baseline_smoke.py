@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from create_flower_smoke_fixture import create_fixture  # noqa: E402
 
+from cropfed.constants import TOMATO_CLASSES  # noqa: E402
 from cropfed.data.audit import audit_prepared_data, write_audit_report  # noqa: E402
 from cropfed.experiments.centralized import run_centralized  # noqa: E402
 from cropfed.experiments.local_only import run_local_only  # noqa: E402
@@ -29,13 +30,15 @@ def run_smoke(output_root: Path) -> dict[str, object]:
         test_manifest=processed / "test_manifest.csv",
         client_data_root=fixture_root / "clients",
         num_clients=4,
+        class_names=TOMATO_CLASSES,
     )
     write_audit_report(audit, output_root / "data_audit.json")
     if audit["status"] != "passed":
         raise RuntimeError("baseline fixture audit failed")
 
     centralized = run_centralized(
-        train_manifest=processed / "train_manifest.csv",
+        train_manifest=processed / "pooled_train_manifest.csv",
+        validation_manifest=processed / "validation_manifest.csv",
         test_manifest=processed / "test_manifest.csv",
         model_name="mobilenet_v2",
         epochs=1,

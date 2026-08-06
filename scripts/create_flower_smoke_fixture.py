@@ -29,6 +29,8 @@ def create_fixture(output_root: Path, *, num_clients: int = 4) -> dict[str, obje
     processed_root = output_root / "processed"
     client_root = output_root / "clients"
     train_records: list[ImageRecord] = []
+    pooled_train: list[ImageRecord] = []
+    pooled_validation: list[ImageRecord] = []
 
     for client_id in range(num_clients):
         local_records: list[ImageRecord] = []
@@ -55,6 +57,10 @@ def create_fixture(output_root: Path, *, num_clients: int = 4) -> dict[str, obje
             for record in local_records[:-1]
         ]
         local_validation = [_replace_split(local_records[-1], "local_val")]
+        pooled_train.extend(_replace_split(record, "train") for record in local_train)
+        pooled_validation.extend(
+            _replace_split(record, "validation") for record in local_validation
+        )
         client_dir = client_root / f"client_{client_id}"
         write_manifest(local_train, client_dir / "train_manifest.csv")
         write_manifest(local_validation, client_dir / "val_manifest.csv")
@@ -73,13 +79,18 @@ def create_fixture(output_root: Path, *, num_clients: int = 4) -> dict[str, obje
         )
 
     train_manifest = processed_root / "train_manifest.csv"
+    pooled_train_manifest = processed_root / "pooled_train_manifest.csv"
+    validation_manifest = processed_root / "validation_manifest.csv"
     test_manifest = processed_root / "test_manifest.csv"
     write_manifest(train_records, train_manifest)
+    write_manifest(pooled_train, pooled_train_manifest)
+    write_manifest(pooled_validation, validation_manifest)
     write_manifest(test_records, test_manifest)
     report = audit_prepared_data(
         train_manifest=train_manifest,
         test_manifest=test_manifest,
         client_data_root=client_root,
+        class_names=TOMATO_CLASSES,
         num_clients=num_clients,
     )
     audit_path = processed_root / "data_audit.json"
@@ -92,6 +103,8 @@ def create_fixture(output_root: Path, *, num_clients: int = 4) -> dict[str, obje
         "output_root": output_root.as_posix(),
         "client_data_root": client_root.as_posix(),
         "train_manifest": train_manifest.as_posix(),
+        "pooled_train_manifest": pooled_train_manifest.as_posix(),
+        "validation_manifest": validation_manifest.as_posix(),
         "test_manifest": test_manifest.as_posix(),
         "audit_report": audit_path.as_posix(),
         "num_clients": num_clients,

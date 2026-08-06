@@ -11,6 +11,22 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class ClientRecord(SQLModel, table=True):
+    """An agricultural facility registered with the FL system."""
+
+    __tablename__ = "clients"
+
+    id: str = Field(primary_key=True, max_length=36)
+    name: str = Field(index=True, max_length=120)
+    description: str = Field(default="", max_length=500)
+    status: str = Field(default="registered", index=True, max_length=24)
+    partition_id: int | None = Field(default=None)
+    num_local_samples: int | None = Field(default=None)
+    last_seen_at: datetime | None = Field(default=None)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class ExperimentRecord(SQLModel, table=True):
     __tablename__ = "experiments"
 
@@ -27,6 +43,9 @@ class ExperimentRecord(SQLModel, table=True):
     batch_size: int
     dirichlet_alpha: float
     proximal_mu: float
+    scaffold_server_lr: float = 1.0
+    moon_temperature: float = 0.5
+    moon_mu: float = 1.0
     seed: int
     result_json: str | None = Field(default=None)
     error_message: str | None = Field(default=None, max_length=2_000)

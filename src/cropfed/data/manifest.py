@@ -1,4 +1,4 @@
-"""Build auditable CSV manifests from the PlantVillage tomato subset."""
+"""Build auditable CSV manifests from PlantVillage folders."""
 
 from __future__ import annotations
 
@@ -12,7 +12,10 @@ from pathlib import Path
 
 import numpy as np
 
-from cropfed.constants import PLANTVILLAGE_FOLDER_TO_CLASS, TOMATO_CLASSES
+from cropfed.constants import (
+    TOMATO_TAXONOMY,
+    DatasetTaxonomy,
+)
 from cropfed.data.partitioning import make_partitions, partition_statistics
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
@@ -27,19 +30,22 @@ class ImageRecord:
     split: str = "unassigned"
 
 
-def scan_plantvillage_tomato(root: Path) -> list[ImageRecord]:
-    """Scan expected PlantVillage folders without copying image bytes."""
+def scan_plantvillage(
+    root: Path,
+    taxonomy: DatasetTaxonomy,
+) -> list[ImageRecord]:
+    """Scan every folder required by ``taxonomy`` without copying image bytes."""
 
     root = root.expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"dataset root does not exist: {root}")
 
     records: list[ImageRecord] = []
-    for folder_name, class_name in PLANTVILLAGE_FOLDER_TO_CLASS.items():
+    for folder_name, class_name in taxonomy.folder_to_class.items():
         class_dir = root / folder_name
         if not class_dir.is_dir():
             raise FileNotFoundError(f"missing required class folder: {class_dir}")
-        label_id = TOMATO_CLASSES.index(class_name)
+        label_id = taxonomy.class_names.index(class_name)
         for path in sorted(class_dir.rglob("*")):
             if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
                 relative = path.relative_to(root).as_posix()
@@ -57,10 +63,18 @@ def scan_plantvillage_tomato(root: Path) -> list[ImageRecord]:
     return records
 
 
+def scan_plantvillage_tomato(root: Path) -> list[ImageRecord]:
+    """Compatibility wrapper for the original ten-class tomato pilot."""
+
+    return scan_plantvillage(root, TOMATO_TAXONOMY)
+
+
 def stratified_train_test_split(
     records: Iterable[ImageRecord],
     test_fraction: float = 0.2,
     seed: int = 2026,
+    *,
+    num_classes: int,
 ) -> tuple[list[ImageRecord], list[ImageRecord]]:
     """Split each class before client partitioning to prevent test leakage."""
 
@@ -71,7 +85,7 @@ def stratified_train_test_split(
     train: list[ImageRecord] = []
     test: list[ImageRecord] = []
 
-    for label_id in range(len(TOMATO_CLASSES)):
+    for label_id in range(num_classes):
         class_rows = [row for row in rows if row.label_id == label_id]
         if len(class_rows) < 2:
             raise ValueError(f"class {label_id} needs at least two images")
@@ -97,6 +111,8 @@ def content_grouped_stratified_train_test_split(
     records: Iterable[ImageRecord],
     test_fraction: float = 0.2,
     seed: int = 2026,
+    *,
+    num_classes: int,
 ) -> tuple[list[ImageRecord], list[ImageRecord], dict[str, object]]:
     """Stratify without allowing exact-content duplicates across the split.
 
@@ -130,7 +146,7 @@ def content_grouped_stratified_train_test_split(
     rng = np.random.default_rng(seed)
     test_hashes: set[str] = set()
     class_summary: list[dict[str, int]] = []
-    for label_id in range(len(TOMATO_CLASSES)):
+    for label_id in range(num_classes):
         class_hashes = [
             digest
             for digest, labels in labels_by_hash.items()
@@ -222,33 +238,81 @@ def write_client_manifests(
     num_clients: int = 4,
     partition_kind: str = "dirichlet",
     alpha: float = 0.5,
+    quantity_skew: bool = False,
+    feature_skew_strength: float = 0.5,
     validation_fraction: float = 0.2,
     seed: int = 2026,
+    pooled_output_dir: Path | None = None,
+    num_classes: int,
 ) -> list[dict[str, object]]:
-    """Partition training records and create local train/validation manifests."""
+    """Partition records and create local plus optional pooled train/validation files."""
 
     if not 0 < validation_fraction < 1:
         raise ValueError("validation_fraction must be between 0 and 1")
     rows = list(train_records)
     labels = np.asarray([row.label_id for row in rows], dtype=np.int64)
-    partitions = make_partitions(
-        labels,
+    content_keys = [_client_partition_group_key(row) for row in rows]
+    grouped_indices: dict[str, list[int]] = defaultdict(list)
+    grouped_labels: dict[str, int] = {}
+    for index, (row, content_key) in enumerate(
+        zip(rows, content_keys, strict=True)
+    ):
+        existing_label = grouped_labels.setdefault(content_key, row.label_id)
+        if existing_label != row.label_id:
+            raise ValueError("identical client-partition content has conflicting labels")
+        grouped_indices[content_key].append(index)
+    content_groups = list(grouped_indices.values())
+    group_labels = np.asarray(
+        [rows[indices[0]].label_id for indices in content_groups],
+        dtype=np.int64,
+    )
+    grouped_partitions = make_partitions(
+        group_labels,
         num_clients,
         partition_kind,
         alpha=alpha,
         seed=seed,
         min_size=2,
+        quantity_skew=quantity_skew,
+        feature_skew_strength=feature_skew_strength,
     )
+    partitions = [
+        np.asarray(
+            [
+                source_index
+                for group_index in group_partition
+                for source_index in content_groups[int(group_index)]
+            ],
+            dtype=np.int64,
+        )
+        for group_partition in grouped_partitions
+    ]
     rng = np.random.default_rng(seed + 17)
-    summary = partition_statistics(labels, partitions, num_classes=len(TOMATO_CLASSES))
+    summary = partition_statistics(labels, partitions, num_classes=num_classes)
+    pooled_train: list[ImageRecord] = []
+    pooled_validation: list[ImageRecord] = []
 
     for client_id, indices in enumerate(partitions):
-        shuffled = indices.copy()
-        rng.shuffle(shuffled)
-        validation_size = max(1, int(round(shuffled.size * validation_fraction)))
-        if validation_size >= shuffled.size:
-            validation_size = shuffled.size - 1
-        validation_indices = set(shuffled[:validation_size].tolist())
+        local_groups: dict[str, list[int]] = defaultdict(list)
+        for source_index in indices:
+            local_groups[content_keys[int(source_index)]].append(int(source_index))
+        shuffled_groups = list(local_groups.values())
+        rng.shuffle(shuffled_groups)
+        validation_group_count = max(
+            1,
+            int(round(len(shuffled_groups) * validation_fraction)),
+        )
+        if validation_group_count >= len(shuffled_groups):
+            validation_group_count = len(shuffled_groups) - 1
+        if validation_group_count < 1:
+            raise ValueError(
+                f"client {client_id} needs at least two content groups for train/validation"
+            )
+        validation_indices = {
+            source_index
+            for group in shuffled_groups[:validation_group_count]
+            for source_index in group
+        }
         local_train: list[ImageRecord] = []
         local_validation: list[ImageRecord] = []
         for source_index in indices:
@@ -264,18 +328,64 @@ def write_client_manifests(
             )
             (local_validation if is_validation else local_train).append(record)
 
+        pooled_train.extend(
+            ImageRecord(
+                image_id=record.image_id,
+                path=record.path,
+                label_id=record.label_id,
+                label_name=record.label_name,
+                split="train",
+            )
+            for record in local_train
+        )
+        pooled_validation.extend(
+            ImageRecord(
+                image_id=record.image_id,
+                path=record.path,
+                label_id=record.label_id,
+                label_name=record.label_name,
+                split="validation",
+            )
+            for record in local_validation
+        )
+
         client_dir = destination_root / f"client_{client_id}"
         write_manifest(local_train, client_dir / "train_manifest.csv")
         write_manifest(local_validation, client_dir / "val_manifest.csv")
         summary[client_id]["num_train"] = len(local_train)
         summary[client_id]["num_validation"] = len(local_validation)
 
+    if pooled_output_dir is not None:
+        write_manifest(
+            sorted(pooled_train, key=lambda record: record.image_id),
+            pooled_output_dir / "pooled_train_manifest.csv",
+        )
+        write_manifest(
+            sorted(pooled_validation, key=lambda record: record.image_id),
+            pooled_output_dir / "validation_manifest.csv",
+        )
+
     destination_root.mkdir(parents=True, exist_ok=True)
     (destination_root / "partition_summary.json").write_text(
         json.dumps(
             {
                 "partition_kind": partition_kind,
+                "skew_type": (
+                    "quantity"
+                    if quantity_skew
+                    else "feature"
+                    if partition_kind == "feature_skew"
+                    else "label"
+                    if partition_kind == "dirichlet"
+                    else "none"
+                ),
                 "dirichlet_alpha": alpha if partition_kind == "dirichlet" else None,
+                "quantity_skew": quantity_skew,
+                "feature_skew_strength": (
+                    feature_skew_strength
+                    if partition_kind == "feature_skew"
+                    else None
+                ),
                 "num_clients": num_clients,
                 "seed": seed,
                 "clients": summary,
@@ -312,3 +422,12 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _client_partition_group_key(record: ImageRecord) -> str:
+    path = Path(record.path).expanduser()
+    if path.is_file():
+        return f"sha256:{_sha256_file(path)}"
+    # Dependency-light unit tests may use virtual paths. Unique IDs retain the
+    # historical behavior without weakening production grouping of real files.
+    return f"image-id:{record.image_id}"

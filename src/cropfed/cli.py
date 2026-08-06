@@ -9,9 +9,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from cropfed.config import ExperimentConfig
+from cropfed.constants import taxonomy_from_scope
 from cropfed.data.manifest import (
     content_grouped_stratified_train_test_split,
-    scan_plantvillage_tomato,
+    scan_plantvillage,
     write_client_manifests,
     write_manifest,
 )
@@ -38,8 +39,16 @@ def build_parser() -> argparse.ArgumentParser:
     demo = subparsers.add_parser(
         "demo", help="run a dependency-light synthetic FL smoke test"
     )
-    demo.add_argument("--algorithm", choices=["fedavg", "fedprox"], default="fedavg")
-    demo.add_argument("--partition", choices=["iid", "dirichlet"], default="dirichlet")
+    demo.add_argument(
+        "--algorithm",
+        choices=["fedavg", "fedprox", "fedbn", "scaffold", "moon"],
+        default="fedavg",
+    )
+    demo.add_argument(
+        "--partition",
+        choices=["iid", "dirichlet", "quantity_skew", "feature_skew"],
+        default="dirichlet",
+    )
     demo.add_argument("--alpha", type=float, default=0.5)
     demo.add_argument("--clients", type=int, default=4)
     demo.add_argument("--rounds", type=int, default=5)
@@ -50,9 +59,14 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--output", type=Path, default=Path("artifacts/smoke-result.json"))
 
     prepare = subparsers.add_parser(
-        "prepare-data", help="scan PlantVillage tomato folders and write manifests"
+        "prepare-data", help="scan PlantVillage folders and write manifests"
     )
     prepare.add_argument("--dataset-root", type=Path, required=True)
+    prepare.add_argument(
+        "--taxonomy",
+        choices=["plantvillage-full", "tomato"],
+        default="plantvillage-full",
+    )
     prepare.add_argument("--output-dir", type=Path, default=Path("data/processed"))
     prepare.add_argument(
         "--client-output-root",
@@ -62,7 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--test-fraction", type=float, default=0.2)
     prepare.add_argument("--validation-fraction", type=float, default=0.2)
     prepare.add_argument("--clients", type=int, default=4)
-    prepare.add_argument("--partition", choices=["iid", "dirichlet"], default="dirichlet")
+    prepare.add_argument(
+        "--partition",
+        choices=["iid", "dirichlet", "quantity_skew", "feature_skew"],
+        default="dirichlet",
+    )
     prepare.add_argument("--alpha", type=float, default=0.5)
     prepare.add_argument("--seed", type=int, default=2026)
 
@@ -78,6 +96,50 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_profiles.add_argument("--validation-fraction", type=float, default=0.2)
     prepare_profiles.add_argument("--clients", type=int, default=4)
     prepare_profiles.add_argument("--seed", type=int, default=2026)
+
+    prepare_full_profiles = subparsers.add_parser(
+        "prepare-full-profiles",
+        help="create/audit full 38-class PlantVillage IID and Non-IID profiles",
+    )
+    prepare_full_profiles.add_argument("--dataset-root", type=Path, required=True)
+    prepare_full_profiles.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/flower-profiles-full"),
+    )
+    prepare_full_profiles.add_argument("--test-fraction", type=float, default=0.2)
+    prepare_full_profiles.add_argument(
+        "--validation-fraction", type=float, default=0.2
+    )
+    prepare_full_profiles.add_argument("--clients", type=int, default=4)
+    prepare_full_profiles.add_argument("--seed", type=int, default=2026)
+
+    extend_profiles = subparsers.add_parser(
+        "extend-full-profiles",
+        help=(
+            "add missing skew profiles to an existing 38-class set, reusing its "
+            "train/test split instead of creating a new one"
+        ),
+    )
+    extend_profiles.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("data/flower-profiles-full"),
+    )
+    extend_profiles.add_argument(
+        "--profile",
+        action="append",
+        choices=["quantity-skew", "feature-skew"],
+        help="repeat to add several; defaults to every profile still missing",
+    )
+    extend_profiles.add_argument(
+        "--source-profile",
+        default="iid",
+        help="existing profile whose train/test manifests are reused verbatim",
+    )
+    extend_profiles.add_argument("--validation-fraction", type=float, default=0.2)
+    extend_profiles.add_argument("--clients", type=int, default=4)
+    extend_profiles.add_argument("--seed", type=int, default=2026)
 
     audit = subparsers.add_parser(
         "audit-data",
@@ -100,6 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit.add_argument("--clients", type=int, default=4)
     audit.add_argument(
+        "--taxonomy",
+        choices=["plantvillage-full", "tomato"],
+        default="plantvillage-full",
+    )
+    audit.add_argument(
         "--output",
         type=Path,
         default=Path("data/processed/data_audit.json"),
@@ -109,25 +176,48 @@ def build_parser() -> argparse.ArgumentParser:
         "train-centralized", help="train the centralized MobileNetV2 baseline"
     )
     centralized.add_argument(
-        "--train-manifest", type=Path, default=Path("data/processed/train_manifest.csv")
+        "--train-manifest",
+        type=Path,
+        default=Path("data/processed/pooled_train_manifest.csv"),
+    )
+    centralized.add_argument(
+        "--validation-manifest",
+        type=Path,
+        default=Path("data/processed/validation_manifest.csv"),
     )
     centralized.add_argument(
         "--test-manifest", type=Path, default=Path("data/processed/test_manifest.csv")
     )
     centralized.add_argument(
         "--model",
-        choices=["mobilenet_v2", "resnet18"],
+        choices=["mobilenet_v2", "mobilenet_v3_small", "efficientnet_lite0", "resnet18"],
         default="mobilenet_v2",
     )
     centralized.add_argument("--epochs", type=int, default=10)
     centralized.add_argument("--batch-size", type=int, default=32)
     centralized.add_argument("--learning-rate", type=float, default=0.001)
     centralized.add_argument("--seed", type=int, default=2026)
-    centralized.add_argument("--no-pretrained", action="store_true")
     centralized.add_argument(
+        "--taxonomy",
+        choices=["plantvillage-full", "tomato"],
+        default="plantvillage-full",
+    )
+    centralized.add_argument("--no-pretrained", action="store_true")
+    centralized_classification = centralized.add_mutually_exclusive_group()
+    centralized_classification.add_argument(
         "--pilot",
         action="store_true",
         help="mark this short validation run as ineligible for research export",
+    )
+    centralized_classification.add_argument(
+        "--research-run",
+        action="store_true",
+        help="explicitly declare a protocol-locked main-study run",
+    )
+    centralized.add_argument(
+        "--protocol-lock",
+        type=Path,
+        help="locked JSON protocol required together with --research-run",
     )
     centralized.add_argument(
         "--output-dir", type=Path, default=Path("artifacts/centralized")
@@ -145,21 +235,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     local_only.add_argument("--clients", type=int, default=4)
     local_only.add_argument(
-        "--model", choices=["mobilenet_v2", "resnet18"], default="mobilenet_v2"
+        "--model",
+        choices=["mobilenet_v2", "mobilenet_v3_small", "efficientnet_lite0", "resnet18"],
+        default="mobilenet_v2",
     )
     local_only.add_argument("--epochs", type=int, default=30)
     local_only.add_argument("--batch-size", type=int, default=32)
     local_only.add_argument("--learning-rate", type=float, default=0.001)
     local_only.add_argument("--seed", type=int, default=2026)
     local_only.add_argument(
+        "--taxonomy",
+        choices=["plantvillage-full", "tomato"],
+        default="plantvillage-full",
+    )
+    local_only.add_argument(
         "--partition", choices=["iid", "dirichlet"], default="dirichlet"
     )
     local_only.add_argument("--alpha", type=float, default=0.5)
     local_only.add_argument("--no-pretrained", action="store_true")
-    local_only.add_argument(
+    local_classification = local_only.add_mutually_exclusive_group()
+    local_classification.add_argument(
         "--pilot",
         action="store_true",
         help="mark this short validation run as ineligible for research export",
+    )
+    local_classification.add_argument(
+        "--research-run",
+        action="store_true",
+        help="explicitly declare a protocol-locked main-study run",
+    )
+    local_only.add_argument(
+        "--protocol-lock",
+        type=Path,
+        help="locked JSON protocol required together with --research-run",
     )
     local_only.add_argument(
         "--output-dir", type=Path, default=Path("artifacts/local-only")
@@ -185,7 +293,7 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--image", type=Path, required=True)
     predict.add_argument(
         "--model",
-        choices=["mobilenet_v2", "resnet18"],
+        choices=["mobilenet_v2", "mobilenet_v3_small", "efficientnet_lite0", "resnet18"],
         default=None,
         help="inferred from versioned checkpoints; required for legacy ResNet18",
     )
@@ -222,9 +330,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "prepare-data":
-        records = scan_plantvillage_tomato(args.dataset_root)
+        taxonomy = taxonomy_from_scope(args.taxonomy)
+        records = scan_plantvillage(args.dataset_root, taxonomy)
         train, test, split_statistics = content_grouped_stratified_train_test_split(
-            records, test_fraction=args.test_fraction, seed=args.seed
+            records,
+            test_fraction=args.test_fraction,
+            seed=args.seed,
+            num_classes=len(taxonomy.class_names),
         )
         write_manifest(train, args.output_dir / "train_manifest.csv")
         write_manifest(test, args.output_dir / "test_manifest.csv")
@@ -236,6 +348,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             alpha=args.alpha,
             validation_fraction=args.validation_fraction,
             seed=args.seed,
+            pooled_output_dir=args.output_dir,
+            num_classes=len(taxonomy.class_names),
         )
         print(
             f"prepared manifests: train={len(train)}, test={len(test)}, "
@@ -265,14 +379,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0 if result["status"] == "passed" else 2
 
+    if args.command == "prepare-full-profiles":
+        from cropfed.data.profiles import prepare_full_profiles
+
+        result = prepare_full_profiles(
+            dataset_root=args.dataset_root,
+            output_root=args.output_root,
+            test_fraction=args.test_fraction,
+            validation_fraction=args.validation_fraction,
+            num_clients=args.clients,
+            seed=args.seed,
+        )
+        invariants = result["shared_split_invariants"]
+        print(
+            f"full profiles {result['status']}: classes={result['num_classes']}, "
+            f"images={result['num_source_images']}, profiles={len(result['profiles'])}, "
+            f"shared_test={invariants['same_global_test_manifest']}, "
+            f"output={args.output_root}"
+        )
+        return 0 if result["status"] == "passed" else 2
+
+    if args.command == "extend-full-profiles":
+        import json as _json
+
+        from cropfed.constants import PLANTVILLAGE_FULL_TAXONOMY
+        from cropfed.data.profiles import FULL_PROFILE_SPECS, extend_data_profiles
+
+        index_path = args.output_root / "profiles_index.json"
+        if not index_path.is_file():
+            print(f"no profile set found at {args.output_root}", file=sys.stderr)
+            return 2
+        existing = {
+            row["name"]
+            for row in _json.loads(index_path.read_text(encoding="utf-8"))["profiles"]
+        }
+        requested = set(args.profile or ["quantity-skew", "feature-skew"])
+        specs = tuple(
+            spec
+            for spec in FULL_PROFILE_SPECS
+            if spec.name in requested and spec.name not in existing
+        )
+        if not specs:
+            print(
+                "nothing to add: every requested profile already exists in "
+                f"{args.output_root}"
+            )
+            return 0
+
+        result = extend_data_profiles(
+            output_root=args.output_root,
+            taxonomy=PLANTVILLAGE_FULL_TAXONOMY,
+            profile_specs=specs,
+            source_profile=args.source_profile,
+            validation_fraction=args.validation_fraction,
+            num_clients=args.clients,
+            seed=args.seed,
+        )
+        invariants = result["shared_split_invariants"]
+        print(
+            f"extended profiles {result['status']}: "
+            f"added={[spec.name for spec in specs]}, "
+            f"total={len(result['profiles'])}, "
+            f"shared_test={invariants['same_global_test_manifest']}, "
+            f"shared_train={invariants['same_train_manifest']}, "
+            f"output={args.output_root}"
+        )
+        return 0 if result["status"] == "passed" else 2
+
     if args.command == "audit-data":
         from cropfed.data.audit import audit_prepared_data, write_audit_report
 
+        taxonomy = taxonomy_from_scope(args.taxonomy)
         report = audit_prepared_data(
             train_manifest=args.train_manifest,
             test_manifest=args.test_manifest,
             client_data_root=args.client_data_root,
             num_clients=args.clients,
+            class_names=taxonomy.class_names,
         )
         write_audit_report(report, args.output)
         print(
@@ -286,8 +469,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "train-centralized":
         from cropfed.experiments.centralized import run_centralized
 
+        taxonomy = taxonomy_from_scope(args.taxonomy)
         result = run_centralized(
             train_manifest=args.train_manifest,
+            validation_manifest=args.validation_manifest,
             test_manifest=args.test_manifest,
             model_name=args.model,
             epochs=args.epochs,
@@ -296,7 +481,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             pretrained=not args.no_pretrained,
             seed=args.seed,
             output_dir=args.output_dir,
-            research_result_valid=False if args.pilot else None,
+            research_result_valid=_research_result_valid(args),
+            protocol_lock=args.protocol_lock,
+            class_names=taxonomy.class_names,
+            class_groups=taxonomy.class_groups,
         )
         print(
             f"centralized complete: accuracy={result['metrics']['accuracy']:.4f}, "
@@ -307,6 +495,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "train-local-only":
         from cropfed.experiments.local_only import run_local_only
 
+        taxonomy = taxonomy_from_scope(args.taxonomy)
         result = run_local_only(
             client_data_root=args.client_data_root,
             test_manifest=args.test_manifest,
@@ -320,7 +509,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output_dir,
             partition_kind=args.partition,
             dirichlet_alpha=args.alpha if args.partition == "dirichlet" else None,
-            research_result_valid=False if args.pilot else None,
+            research_result_valid=_research_result_valid(args),
+            protocol_lock=args.protocol_lock,
+            class_names=taxonomy.class_names,
+            class_groups=taxonomy.class_groups,
         )
         print(
             "local-only complete: "
@@ -355,6 +547,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
     raise AssertionError("unreachable command")
+
+
+def _research_result_valid(args: argparse.Namespace) -> bool | None:
+    """Classify a run conservatively; research eligibility is never implicit."""
+
+    if bool(getattr(args, "research_run", False)):
+        if getattr(args, "protocol_lock", None) is None:
+            raise ValueError("--research-run requires --protocol-lock")
+        return True
+    if bool(getattr(args, "pilot", False)):
+        return False
+    return None
 
 
 if __name__ == "__main__":

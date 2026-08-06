@@ -96,6 +96,8 @@ class ApiWorkerTests(unittest.TestCase):
         self.assertIn("algorithm='fedprox'", run_config)
         self.assertIn("num-clients=4", run_config)
         self.assertIn("pretrained=false", run_config)
+        self.assertIn("global-test-manifest=", run_config)
+        self.assertNotIn("central-test-manifest=", run_config)
         self.assertNotIn("shell", command)
 
     def test_worker_completes_claimed_job_with_injected_executor(self) -> None:

@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
 from cropfed.constants import (
-    TOMATO_CLASS_GROUPS,
     TOMATO_CLASSES,
-    TOMATO_CROP_NAME,
+    class_group_for_name,
+    crop_for_class_name,
 )
 from cropfed.data.torch_data import build_transforms
 from cropfed.ml.checkpoint import load_model_checkpoint
@@ -31,10 +32,11 @@ def predict_image(
 
     if not image_path.is_file():
         raise FileNotFoundError(f"image not found: {image_path}")
-    if not 1 <= top_k <= len(TOMATO_CLASSES):
-        raise ValueError(f"top_k must be between 1 and {len(TOMATO_CLASSES)}")
-
+    inference_started = time.perf_counter()
     loaded = load_model_checkpoint(checkpoint_path)
+    class_order = loaded.class_order or TOMATO_CLASSES
+    if not 1 <= top_k <= len(class_order):
+        raise ValueError(f"top_k must be between 1 and {len(class_order)}")
     resolved_model_name = loaded.model_name or model_name or "mobilenet_v2"
     if model_name is not None and loaded.model_name not in {None, model_name}:
         raise ValueError(
@@ -45,7 +47,7 @@ def predict_image(
     device = select_device()
     model = build_model(
         resolved_model_name,
-        num_classes=len(TOMATO_CLASSES),
+        num_classes=len(class_order),
         pretrained=False,
     )
     model.load_state_dict(loaded.state_dict)
@@ -61,8 +63,9 @@ def predict_image(
     predictions = [
         {
             "class_id": int(class_id),
-            "label": TOMATO_CLASSES[int(class_id)],
-            "group": TOMATO_CLASS_GROUPS[int(class_id)],
+            "label": class_order[int(class_id)],
+            "group": class_group_for_name(class_order[int(class_id)]),
+            "crop": crop_for_class_name(class_order[int(class_id)]),
             "confidence": float(score),
         }
         for score, class_id in zip(
@@ -71,10 +74,11 @@ def predict_image(
             strict=True,
         )
     ]
+    inference_ms = (time.perf_counter() - inference_started) * 1000.0
     primary = predictions[0]
     return {
         "image_name": image_path.name,
-        "crop": TOMATO_CROP_NAME,
+        "crop": primary["crop"],
         "predicted_class_id": primary["class_id"],
         "predicted_label": primary["label"],
         "predicted_group": primary["group"],
@@ -83,6 +87,7 @@ def predict_image(
         "model_version": loaded.model_version,
         "checkpoint_format_version": loaded.format_version,
         "predictions": predictions,
+        "inference_ms": round(inference_ms, 2),
         "warning": (
             "Kết quả chỉ hỗ trợ sàng lọc từ ảnh và không thay thế "
             "chẩn đoán của chuyên gia nông nghiệp."

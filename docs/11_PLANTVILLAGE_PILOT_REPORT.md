@@ -110,10 +110,115 @@ test 3.631 ảnh.
 
 Centralized pilot Macro-F1 0,8688 cao hơn cả local-only tốt nhất 0,7689 và trung
 bình 0,6313. Đây là tín hiệu pilot phù hợp giả thuyết hợp tác, không phải kết luận
-RQ4 vì mới một seed/một epoch và chưa có global FL model PlantVillage để đối chiếu.
+RQ4 vì mới một seed/một epoch.
 
-## 6. Việc tiếp theo
+## 6. Flower FedAvg IID pilot — 1 round, 4 client
 
-1. Chạy Flower FedAvg IID 1 round trên chính manifest/checksum này.
-2. Chạy FedAvg/FedProx `α=0.5` và `α=0.1` sau khi pilot tài nguyên đạt.
-3. Chỉ sau đó mới khóa số epoch/round, `μ` và chạy seed nghiên cứu chính.
+Artifact đạt:
+`artifacts/plantvillage-flower-fedavg-iid-pilot-seed2026/`.
+Run dùng MobileNetV2 pretrained, seed 2026, một local epoch, batch 64, learning
+rate 0,001 và profile IID. Bốn client có cùng 2.906 ảnh train; validation cục bộ
+lần lượt có 727/726/726/726 ảnh. Global test vẫn là 3.631 ảnh đã khóa ở mục 2.
+
+| Metric sau round 1 | Giá trị |
+|---|---:|
+| Central accuracy | 0,93335 |
+| Central macro precision | 0,93289 |
+| Central macro recall | 0,90910 |
+| Central macro F1 | 0,91453 |
+| Central harmful → healthy rate | 0,01268 (42 ảnh) |
+| Central disease F1 | 0,98798 |
+| Central pest/spider-mite F1 | 0,85329 |
+| Aggregated client validation accuracy | 0,93563 |
+| Aggregated client validation macro F1 | 0,90664 |
+| Aggregated train loss | 0,61594 |
+| Tổng payload gửi + nhận | 109.596.872 byte |
+| Strategy runtime | 1.533,55 giây |
+
+Flower nhận đủ 4/4 train reply và 4/4 evaluate reply, không có failure. Checkpoint
+SHA-256 là
+`46f2d1e2b114d436f6f563bcdf3d52f7ae2f32414d9a9fbd34dd2f4b39ef0ce7`;
+hash checkpoint và `environment.json` đều khớp `run_manifest.json`. Server không
+nhận ảnh gốc (`raw_images_received_by_server=false`). Artifact được khóa
+`result_kind=federated_image_pilot`, `research_result_valid=false` và
+`pilot_not_for_research`.
+
+CLI cũng đã nạp trực tiếp `global_model.pt` và dự đoán mẫu đầu tiên của global
+test là `Tomato healthy` với confidence 0,99986; output xác nhận
+`image_uploaded=false`.
+
+Lần thử đầu dùng bốn Ray actor song song trên Windows bị `ActorDiedError` và chỉ
+nhận 0/4 reply; log được giữ tại
+`artifacts/run-logs/flower-fedavg-iid-pilot-parallel-actors-failed-20260731.*.log`.
+Tracking strategy đã được sửa để dừng ngay nếu số valid reply ít hơn số node đã
+gửi, thay vì tiếp tục aggregate/evaluate một kết quả thiếu. Lần đạt dùng một actor
+với 8 CPU để xử lý bốn client tuần tự. Ray vẫn in trace `access violation` từ các
+worker phụ lúc khởi tạo/thu hồi trên Windows, nhưng actor chính hoàn tất, server
+nhận đủ reply, process trả mã 0 và artifact/hash đầy đủ. Khi chạy lại trên Windows
+nên giữ cấu hình một actor; deployment chính thức nên ưu tiên Linux.
+
+Exporter thực tế tại
+`artifacts/export-plantvillage-pilots-exclusion-with-flower-20260731/` nhận cả ba
+artifact centralized/local-only/Flower và trả `included=0`, `excluded=3`; lý do
+loại từng run được ghi trong `export_manifest.json`.
+
+Không so sánh 0,9145 của Flower với 0,8688 centralized như kết luận RQ5: đây là
+pilot một seed/một epoch, hai đường chạy có cách chia train/validation khác nhau và
+global test đã được xem nhiều lần trong quá trình kiểm chứng. Số liệu chỉ chứng
+minh pipeline FL thật có thể hoàn tất và tạo artifact truy vết được.
+
+## 7. Flower FedAvg/FedProx Non-IID pilot — α=0.5 và α=0.1
+
+Bốn pilot bổ sung đã chạy trên cùng seed 2026, một round, một local epoch, batch
+32, learning rate 0,001 và MobileNetV2 pretrained=false (theo profile PlantVillage
+đã khóa). Cấu hình Ray simulation: `client-resources-num-cpus=1` và
+`init-args-num-cpus=8`, một actor xử lý bốn client tuần tự (workaround Windows đã
+ghi ở mục 6). Mỗi pilot dùng `proximal-mu=0.01` cho FedProx; FedAvg lấy `μ=0.0`.
+
+Tất cả bốn artifact đều đạt verification `passed` theo
+`scripts/verify_plantvillage_pilots.py`: SHA-256 checkpoint khớp
+`run_manifest.json`, `client_history.json` bám đúng `(round, client_id, phase)` và
+`flower.log` có evidence `aggregate_train`/`aggregate_evaluate` của 4/4 reply.
+
+| Pilot | Artifact | Checkpoint SHA-256 (12 ký tự đầu) | Communication bytes | Strategy runtime (s) |
+|---|---|---:|---:|---:|
+| FedAvg α=0.5 | `artifacts/plantvillage-flower-fedavg-alpha05-pilot-seed2026/` | `642dde796829` | 109.596.872 | ~1.187 |
+| FedAvg α=0.1 | `artifacts/plantvillage-flower-fedavg-alpha01-pilot-seed2026/` | `4c5b2ca7bbd8` | 109.596.872 | ~1.153 |
+| FedProx α=0.5 | `artifacts/plantvillage-flower-fedprox-alpha05-pilot-seed2026/` | `be9cee850a24` | 109.596.872 | ~1.301 |
+| FedProx α=0.1 | `artifacts/plantvillage-flower-fedprox-alpha01-pilot-seed2026/` | `860247cf090a` | 109.596.872 | ~1.115 |
+
+Checkpoint đều ở format version 1, model version `0.1.0`, đúng 10 lớp cà chua và
+`raw_images_received_by_server=false`. Bốn pilot đều khóa
+`research_result_valid=false`, `protocol_lock=null` và
+`result_kind=federated_image_pilot` — phù hợp vai pilot, không dùng cho RQ1–RQ6.
+
+Metric cuối cùng từ `metrics.json` (`global_test_macro_f1`) vẫn thấp (~0,046) do
+chỉ một round và một local epoch trên tập Non-IID nặng; đây là kết quả pilot, không
+phải so sánh thuật toán. Để khóa `μ` cho main study, cần chạy thêm rounds/local
+epochs và đánh giá `μ ∈ {0.001, 0.01, 0.1}` chỉ trên tập validation (chưa thực
+hiện tại đây).
+
+Lần chạy đầu của FedAvg α=0.5 gặp `ActorDiedError` trên một worker phụ của Ray
+Windows tương tự mục 6, nhận 3/4 reply và tracking dừng sớm; artifact đã được tái
+tạo bằng cách chạy lại cùng cấu hình (`status=passed` sau verify).
+
+## 8. Worker profile end-to-end trên Docker Compose
+
+Worker profile trên Compose (`worker` với `profiles: ["flower"]`) đã được verify
+qua Docker ngày 31/07/2026. Sau khi sửa `pyproject.toml` thêm
+`python-multipart>=0.0.20,<1` (thiếu để FastAPI 0.141 boot) và sửa manifest paths
+từ `F:\project\…` thành POSIX qua `scripts/rewrite_profile_paths.py`, worker claim
+được experiment từ PostgreSQL, chạy data audit POSIX (`pre_run_data_audit.json` đủ
+5 manifests) và spawn Flower subprocess với Ray 8 CPU. Audit fail với 14.529
+`FileNotFoundError` do image_id trùng giữa train/val/test nên audit gắn cờ
+`client_metadata_mismatch`; đây là vấn đề data prep chứ không phải Docker. Một
+round MobileNetV2 CPU với 14.529 ảnh/client vượt 30 phút; cần tăng tài nguyên
+hoặc giảm dataset khi chạy full main matrix trong container.
+
+## 9. Việc tiếp theo
+
+1. Pilot FedAvg/FedProx `α=0.5` và `α=0.1`, chọn `μ` chỉ trên validation.
+2. Khóa số epoch/round, batch size và tiêu chí early stopping trước main study.
+3. Sửa data prep để PlantVillage client manifests chỉ chứa ảnh không trùng
+   train/val/test; sau đó chạy Flower main matrix qua Docker worker profile.
+4. Chạy seed nghiên cứu chính 2026/2027/2028 mà không dùng global test để tinh chỉnh.

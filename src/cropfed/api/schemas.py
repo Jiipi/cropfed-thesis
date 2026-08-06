@@ -16,8 +16,10 @@ class ExperimentCreate(BaseModel):
 
     name: str = Field(default="Thí nghiệm FL", min_length=3, max_length=120)
     execution_mode: ExecutionMode = "synthetic-smoke"
-    algorithm: Literal["fedavg", "fedprox"] = "fedavg"
-    partition_kind: Literal["iid", "dirichlet"] = "dirichlet"
+    algorithm: Literal["fedavg", "fedprox", "fedbn", "scaffold", "moon"] = "fedavg"
+    partition_kind: Literal[
+        "iid", "dirichlet", "quantity_skew", "feature_skew"
+    ] = "dirichlet"
     num_clients: int = Field(default=4, ge=2, le=20)
     num_rounds: int = Field(default=5, ge=1, le=500)
     local_epochs: int = Field(default=2, ge=1, le=100)
@@ -25,6 +27,9 @@ class ExperimentCreate(BaseModel):
     batch_size: int = Field(default=32, ge=1, le=1_024)
     dirichlet_alpha: float = Field(default=0.5, gt=0, le=100)
     proximal_mu: float = Field(default=0.01, ge=0, le=100)
+    scaffold_server_lr: float = Field(default=1.0, gt=0, le=10)
+    moon_temperature: float = Field(default=0.5, gt=0, le=10)
+    moon_mu: float = Field(default=1.0, ge=0, le=100)
     seed: int = Field(default=2026, ge=0)
 
     @model_validator(mode="after")
@@ -61,6 +66,9 @@ class ExperimentPublic(BaseModel):
     batch_size: int
     dirichlet_alpha: float
     proximal_mu: float
+    scaffold_server_lr: float = 1.0
+    moon_temperature: float = 0.5
+    moon_mu: float = 1.0
     seed: int
     result: dict[str, Any] | None
     error_message: str | None
@@ -76,3 +84,62 @@ class ProjectPublic(BaseModel):
     canonical_num_clients: int
     mandatory_algorithms: list[str]
     privacy_boundary: str
+
+
+class ClientCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=2, max_length=120)
+    description: str = Field(default="", max_length=500)
+    partition_id: int | None = Field(default=None, ge=0, le=19)
+    num_local_samples: int | None = Field(default=None, ge=0)
+
+
+class ClientPublic(BaseModel):
+    id: str
+    name: str
+    description: str
+    status: str
+    partition_id: int | None
+    num_local_samples: int | None
+    last_seen_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ClientStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["registered", "connected", "disconnected", "training"] = "connected"
+
+
+class CheckpointPublic(BaseModel):
+    filename: str
+    path: str
+    size_bytes: int
+    model_name: str | None
+    model_version: str | None
+    experiment_type: str | None
+    created_at: str | None
+    sha256: str | None
+    deployed: bool
+    eligible_for_deployment: bool
+    validation_error: str | None
+
+
+class PredictionResponse(BaseModel):
+    image_name: str
+    crop: str
+    predicted_class_id: int
+    predicted_label: str
+    predicted_group: str
+    confidence: float
+    model: str
+    model_version: str
+    checkpoint_format_version: int
+    checkpoint_sha256: str
+    predictions: list[dict[str, Any]]
+    inference_ms: float
+    warning: str
+    privacy_notice: str
+    image_uploaded: bool

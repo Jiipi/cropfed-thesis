@@ -1,6 +1,7 @@
 # 10 — Báo cáo kiểm thử mốc 0.1.0
 
-Ngày chạy: 30/07/2026  
+Ngày chạy: 30–31/07/2026
+
 Runtime lõi: Python 3.13.1, PyTorch 2.13.0+cpu, Torchvision 0.28.0+cpu.  
 Runtime Flower trên Windows: Python 3.12.13, Flower 1.32.1, Ray 2.55.1,
 PyTorch 2.13.0+cpu. Node 22.18.0, npm 10.9.3. Docker Desktop 4.84.0,
@@ -11,11 +12,11 @@ Docker Engine/CLI 29.6.2.
 Lệnh:
 
 ```powershell
-$env:PYTHONPATH = "src"
-.\.venv-flower\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv-flower\Scripts\python.exe -m pytest -q
 ```
 
-Kết quả: **58 test + 2 subtest đạt**.
+Kết quả: **60 test + 2 subtest đạt**; có một cảnh báo deprecation từ
+`fastapi.testclient`/Starlette ở dependency, không có test failure.
 
 Phạm vi:
 
@@ -56,7 +57,9 @@ Phạm vi:
 - endpoint round ưu tiên bảng chuẩn hóa và vẫn giữ payload JSON đầy đủ.
 - endpoint profile chỉ trả count/proportion, không lộ image byte hoặc local path;
 - Flower ghi metric/identity/bytes từng client-phase và từ chối schema mismatch, NaN/Inf, zero-sample;
-- exporter tạo comparison/per-class/confusion/environment/checksum và loại synthetic result;
+- Flower strategy fail-fast nếu số valid reply ít hơn số node đã gửi;
+- exporter tạo comparison/per-class/confusion/environment/checksum, loại synthetic
+  result và loại Flower run có `research_result_valid=false`;
 
 ## 2. Syntax/import-independent compilation
 
@@ -184,6 +187,42 @@ Exporter exclusion smoke tại `artifacts/export-smoke-exclusion-20260730` tạo
 file CSV/JSON nhưng có `included=0`, `excluded=1`, chứng minh Flower fixture không lọt
 vào bảng nghiên cứu.
 
+### 6.2. Pilot PlantVillage thật
+
+Bảy artifact pilot đã được kiểm tra trực tiếp:
+
+- centralized pretrained một epoch: accuracy 0,9325, Macro-F1 0,8688;
+- local-only α=0.5 đủ bốn client: mean global Macro-F1 0,6313, worst 0,4653;
+- Flower FedAvg IID một round: 4/4 train và 4/4 evaluate, 0 failure; central
+  accuracy 0,9334, Macro-F1 0,9145 và harmful→healthy 0,0127;
+- Flower FedAvg α=0.5, FedAvg α=0.1, FedProx α=0.5 và FedProx α=0.1: đều 4/4
+  train và 4/4 evaluate, 0 failure; checkpoint SHA-256 khớp manifest, đủ 8
+  client-phase entry, environment checksum đạt. Bốn pilot đều được verify bởi
+  `scripts/verify_plantvillage_pilots.py` với kết quả `passed`.
+
+Flower checkpoint SHA-256 (12 ký tự đầu):
+FedAvg IID `46f2d1e2`, FedAvg α=0.5 `642dde796829`, FedAvg α=0.1 `4c5b2ca7bbd8`,
+FedProx α=0.5 `be9cee850a24`, FedProx α=0.1 `860247cf090a`. Tất cả
+environment hash đều khớp manifest; tổng payload là 109.596.872 byte. Lần chạy
+bốn Ray actor song song trên Windows thất bại 0/4 reply và được giữ log; retry một
+actor/8 CPU hoàn tất. Trace `access violation` của worker phụ vẫn xuất hiện nên
+main study nên ưu tiên Linux.
+
+Exporter thực tế tại
+`artifacts/export-plantvillage-pilots-exclusion-with-flower-20260731` nhận bảy
+pilot và trả `included=0`, `excluded=7`, đúng vì mọi run đều có
+`research_result_valid=false`.
+
+Lệnh verify mới:
+
+```powershell
+.\.venv-flower\Scripts\python.exe scripts\verify_plantvillage_pilots.py
+```
+
+Kết quả ngày 31/07/2026: **4/4 Flower pilot `passed`**; checkpoint format version
+1, model version `0.1.0`, đúng 10 lớp cà chua, tổng communication 109.596.872
+byte/pilot, không nhận ảnh thô tại server.
+
 ## 7. PostgreSQL/Compose, HTTPS và authorization
 
 Lệnh chính:
@@ -208,13 +247,70 @@ loopback không được Nginx lắng nghe. Contract đã đổi sang `127.0.0.1
 riêng web sau đó chuyển `healthy`. Đây là bằng chứng demo một máy, không phải bằng
 chứng Flower TLS/node authentication hay deployment nhiều máy.
 
+### 7.1. Alembic upgrade/downgrade và backup/restore
+
+Trong container API:
+
+```bash
+docker exec cropfed-thesis-api-1 env CROPFED_PROJECT_ROOT=/app \
+  CROPFED_DATABASE_URL=postgresql+psycopg://cropfed:...@db:5432/cropfed \
+  PYTHONPATH=/app/src python -m cropfed.api.migrate upgrade --revision head
+docker exec cropfed-thesis-api-1 env CROPFED_PROJECT_ROOT=/app \
+  CROPFED_DATABASE_URL=postgresql+psycopg://cropfed:...@db:5432/cropfed \
+  PYTHONPATH=/app/src python -m cropfed.api.migrate downgrade --revision 0001_initial
+docker exec cropfed-thesis-api-1 env CROPFED_PROJECT_ROOT=/app \
+  CROPFED_DATABASE_URL=postgresql+psycopg://cropfed:...@db:5432/cropfed \
+  PYTHONPATH=/app/src python -m cropfed.api.migrate upgrade --revision head
+```
+
+Kết quả ngày 31/07/2026: roundtrip `base ↔ 0001_initial ↔ 0002_clients` đạt
+idempotent; `alembic_version` ghi `0002_clients`. Migration đều kiểm tra
+`has_table`/`has_index` nên upgrade trùng hoặc downgrade về revision cũ an
+toàn. `pyproject.toml` thêm `python-multipart>=0.0.20,<1` để FastAPI 0.141
+khởi động đúng.
+
+Backup/restore:
+
+```powershell
+.\.venv-flower\Scripts\python.exe scripts\backup_postgres_volume.py
+```
+
+`pg_dump --clean --if-exists` stream ra `artifacts/postgres/cropfed-pre-restore.sql`
+(~8 KB SHA-256 `56b9981fb2e7f782…`); spin up container PostgreSQL 17 tạm, restore
+dump, xác nhận schema có 5 bảng public. Container tạm dọn sau verify.
+
+### 7.2. Flower worker profile end-to-end
+
+```powershell
+# .env: CROPFED_FLOWER_WORKER_ENABLED=true
+docker compose --profile flower up -d --no-deps --build api worker
+docker exec cropfed-thesis-api-1 python /tmp/requeue_flower.py /tmp/cfg.json
+```
+
+Kết quả ngày 31/07/2026:
+
+- API tạo experiment `draft`; `POST /experiments/{id}/start` chuyển sang
+  `queued`; worker claim, cập nhật `running` và chạy `pre-run data audit`.
+- Audit mở từng ảnh POSIX theo manifest trong container worker (18.160 ảnh
+  hợp lệ, 14.529 vẫn `FileNotFoundError` — vấn đề data prep, không phải Docker).
+- Worker spawn `flwr run … --stream`; Flower `ServerApp`/`ClientApp` chạy với
+  Ray 8 CPU. Một round với 14.529 ảnh/client và MobileNetV2 CPU vượt 30 phút;
+  audit output tồn tại trong `/app/artifacts/flower-api/<id>/pre_run_data_audit.json`.
+- Worker lưu status vào PostgreSQL; `_finish_experiment` ghi `completed`/
+  `failed` tùy kết quả. `client_round_metrics` và `experiment_rounds` được
+  cập nhật qua `replace_round_history`/`replace_client_history`.
+- Bài học: data prep trên Windows lưu `F:\project\cropfed-thesis\data\…` vào
+  manifest; `scripts/rewrite_profile_paths.py` chuyển thành `/app/data/…` và
+  chuẩn hoá `\` thành `/`. Restart stack mới sync được vào container.
+
 ## 8. Chưa chạy trong môi trường này
 
 | Kiểm thử | Lý do | Cách hoàn tất |
 |---|---|---|
-| PlantVillage main run | centralized pretrained một epoch và inference thật đã đạt nhưng chỉ là pilot | hoàn tất local-only/Flower pilot, khóa protocol rồi chạy main seeds |
-| Flower worker profile/TLS node auth | đã có dữ liệu nhưng chưa nối runtime SuperLink/SuperNode tách máy | cấu hình credential, chạy worker profile và kiểm thử nhiều máy |
-| PostgreSQL migration/restore | mới kiểm chứng schema bootstrap/readiness | thêm migration version hóa, thử upgrade/rollback và backup/restore |
+| PlantVillage main run | centralized, local-only α=0.5, Flower FedAvg IID và bốn Flower FedAvg/FedProx Non-IID đều đã đạt pilot nhưng bị khóa khỏi research export | khóa protocol, tăng rounds/epochs và chạy main seeds 2026/2027/2028 |
+| Flower worker profile/TLS node auth | worker profile + PostgreSQL đã chạy end-to-end (audit + Flower spawn) trên Docker; chưa tách SuperLink/SuperNode đa máy và chưa bật TLS/node auth | dựng SuperLink ngoài container, mount TLS cert, chạy lại |
+| PostgreSQL backup/restore | đã thêm script `scripts/backup_postgres_volume.py`; roundtrip pg_dump → restore đạt, dump 8 KB SHA-256 `56b9981fb2e7f782…`, 5 bảng public | tự động hoá dump theo lịch, mã hoá dump, kiểm thử trên volume lớn |
+| Audit fail nhanh trên PlantVillage trong container | 14.529/32.689 path vẫn trả `FileNotFoundError` dù rewrite path POSIX; nguyên nhân là dữ liệu trùng giữa train/val/test với cùng image_id nên audit gắn cờ `client_metadata_mismatch` | sửa data prep để client manifests chỉ chứa image không xuất hiện trong test/val khác, hoặc cho phép overlap train/val trong audit |
 
 Không được chuyển các mục “chưa chạy” thành “đạt” nếu chưa có log/bằng chứng.
 
@@ -228,3 +324,8 @@ Không được chuyển các mục “chưa chạy” thành “đạt” nếu
 - [x] Baseline image smoke, dashboard confusion/partition heatmap và exporter exclusion.
 - [x] Compose healthcheck.
 - [x] PlantVillage manifest, image corruption và overlap report trên dữ liệu thật.
+- [x] Centralized, local-only α=0.5 và Flower FedAvg IID pilot trên PlantVillage thật.
+- [x] Flower FedAvg/FedProx Non-IID α=0.5 và α=0.1 pilot trên PlantVillage thật, verify checksum bằng `scripts/verify_plantvillage_pilots.py`.
+- [x] PostgreSQL Alembic upgrade/downgrade roundtrip với 2 migration.
+- [x] PostgreSQL backup/restore roundtrip qua `scripts/backup_postgres_volume.py`.
+- [x] Flower worker profile end-to-end: API `start` → worker claim → audit chạy trong container → Flower spawn.

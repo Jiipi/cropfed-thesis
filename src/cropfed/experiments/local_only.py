@@ -4,24 +4,26 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
-from cropfed.constants import TOMATO_CLASSES
+from cropfed.constants import TOMATO_CLASS_GROUPS, TOMATO_CLASSES
 from cropfed.data.torch_data import build_dataloader
 from cropfed.experiments.artifacts import (
     file_sha256,
     prepare_new_output_directory,
     write_environment_artifact,
 )
+from cropfed.experiments.protocol import validate_protocol_lock
 from cropfed.ml.checkpoint import save_model_checkpoint
 from cropfed.ml.model import build_model, count_trainable_parameters
 from cropfed.ml.trainer import (
     evaluate_model,
     select_device,
     set_reproducible_seed,
-    train_local,
+    train_with_validation,
 )
 
 
@@ -40,12 +42,42 @@ def run_local_only(
     partition_kind: str = "unspecified",
     dirichlet_alpha: float | None = None,
     research_result_valid: bool | None = None,
+    protocol_lock: Path | None = None,
+    class_names: Sequence[str] = TOMATO_CLASSES,
+    class_groups: Sequence[str] = TOMATO_CLASS_GROUPS,
 ) -> dict[str, Any]:
     """Train independent client models from identical seeded initialization."""
 
     if num_clients < 2:
         raise ValueError("num_clients must be at least 2")
+    partition_summary = client_data_root / "partition_summary.json"
+    input_manifests = {
+        "global_test_sha256": file_sha256(test_manifest),
+        "partition_summary_sha256": (
+            file_sha256(partition_summary) if partition_summary.is_file() else None
+        ),
+    }
+    protocol_validation = None
+    if research_result_valid is True:
+        protocol_validation = validate_protocol_lock(
+            protocol_lock,
+            experiment_type="local-only",
+            config={
+                "model": model_name,
+                "epochs_per_client": epochs,
+                "batch_size": batch_size,
+                "learning_rate": learning_rate,
+                "pretrained": pretrained,
+                "num_clients": num_clients,
+                "partition_kind": partition_kind,
+                "dirichlet_alpha": dirichlet_alpha,
+            },
+            manifest_hashes=input_manifests,
+            seed=seed,
+        )
     output_dir = prepare_new_output_directory(output_dir)
+    resolved_class_names = tuple(class_names)
+    resolved_class_groups = tuple(class_groups)
     device = select_device()
     client_results: list[dict[str, Any]] = []
     run_started = time.perf_counter()
@@ -64,7 +96,7 @@ def run_local_only(
         set_reproducible_seed(seed)
         model = build_model(
             model_name,
-            num_classes=len(TOMATO_CLASSES),
+            num_classes=len(resolved_class_names),
             pretrained=pretrained,
         )
         train_loader = build_dataloader(
@@ -78,15 +110,23 @@ def run_local_only(
         )
 
         started = time.perf_counter()
-        train_result = train_local(
+        train_result = train_with_validation(
             model,
             train_loader,
+            validation_loader,
             epochs=epochs,
             learning_rate=learning_rate,
             device=device,
+            class_names=resolved_class_names,
+            class_groups=resolved_class_groups,
         )
-        validation = evaluate_model(model, validation_loader, device=device)
-        global_test = evaluate_model(model, global_test_loader, device=device)
+        global_test = evaluate_model(
+            model,
+            global_test_loader,
+            device=device,
+            class_names=resolved_class_names,
+            class_groups=resolved_class_groups,
+        )
         elapsed = time.perf_counter() - started
         checkpoint = output_dir / f"client_{client_id}_model.pt"
         checkpoint_info = save_model_checkpoint(
@@ -98,7 +138,9 @@ def run_local_only(
                 "client_id": client_id,
                 "seed": seed,
                 "epochs": epochs,
+                "best_validation_epoch": train_result.best_epoch,
             },
+            class_order=resolved_class_names,
         )
 
         client_results.append(
@@ -106,8 +148,10 @@ def run_local_only(
                 "client_id": client_id,
                 "num_train": train_result.num_examples,
                 "train_loss": train_result.loss,
-                "local_validation_loss": validation.loss,
-                "local_validation_metrics": validation.metrics,
+                "best_validation_epoch": train_result.best_epoch,
+                "training_history": list(train_result.history),
+                "local_validation_loss": train_result.best_validation.loss,
+                "local_validation_metrics": train_result.best_validation.metrics,
                 "global_test_loss": global_test.loss,
                 "global_test_metrics": global_test.metrics,
                 "elapsed_seconds": elapsed,
@@ -163,13 +207,10 @@ def run_local_only(
             "elapsed_seconds": time.perf_counter() - run_started,
         },
         "clients": client_results,
-        "class_order": list(TOMATO_CLASSES),
-        "global_test_manifest_sha256": file_sha256(test_manifest),
-        "partition_summary_sha256": (
-            file_sha256(client_data_root / "partition_summary.json")
-            if (client_data_root / "partition_summary.json").is_file()
-            else None
-        ),
+        "class_order": list(resolved_class_names),
+        "global_test_manifest_sha256": input_manifests["global_test_sha256"],
+        "partition_summary_sha256": input_manifests["partition_summary_sha256"],
+        "protocol_lock": protocol_validation,
         "environment": write_environment_artifact(output_dir),
         "research_result_valid": research_result_valid,
         "research_validation_status": (

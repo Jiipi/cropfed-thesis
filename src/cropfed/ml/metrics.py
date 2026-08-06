@@ -36,6 +36,7 @@ def classification_metrics(
     num_classes: int,
     class_names: Sequence[str] | None = None,
     healthy_class_id: int | None = None,
+    healthy_class_ids: Sequence[int] | None = None,
     class_groups: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Compute accuracy and macro/per-class precision, recall and F1."""
@@ -85,13 +86,29 @@ def classification_metrics(
         },
         "confusion_matrix": matrix.astype(int).tolist(),
     }
-    if healthy_class_id is not None:
-        if healthy_class_id < 0 or healthy_class_id >= num_classes:
-            raise ValueError("healthy_class_id is outside the class range")
+    if healthy_class_id is not None and healthy_class_ids is not None:
+        raise ValueError("provide healthy_class_id or healthy_class_ids, not both")
+    resolved_healthy_ids = (
+        tuple(healthy_class_ids)
+        if healthy_class_ids is not None
+        else (healthy_class_id,)
+        if healthy_class_id is not None
+        else ()
+    )
+    if resolved_healthy_ids:
+        if len(set(resolved_healthy_ids)) != len(resolved_healthy_ids) or any(
+            class_id < 0 or class_id >= num_classes
+            for class_id in resolved_healthy_ids
+        ):
+            raise ValueError("healthy class IDs are invalid")
         harmful_mask = np.ones(num_classes, dtype=bool)
-        harmful_mask[healthy_class_id] = False
+        harmful_mask[list(resolved_healthy_ids)] = False
         harmful_total = int(actual[harmful_mask].sum())
-        missed_as_healthy = int(matrix[harmful_mask, healthy_class_id].sum())
+        missed_as_healthy = int(
+            matrix[
+                np.ix_(np.flatnonzero(harmful_mask), list(resolved_healthy_ids))
+            ].sum()
+        )
         missed_rate = missed_as_healthy / harmful_total if harmful_total else 0.0
         result["harmful_missed_as_healthy_count"] = missed_as_healthy
         result["harmful_missed_as_healthy_rate"] = float(missed_rate)

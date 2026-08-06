@@ -21,11 +21,12 @@ from sqlalchemy import update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from cropfed.api.db import engine, init_database
+from cropfed.api.db import engine
+from cropfed.api.migrate import upgrade_database
 from cropfed.api.models import ExperimentRecord
 from cropfed.api.results import replace_client_history, replace_round_history
 from cropfed.api.settings import Settings, settings
-from cropfed.constants import TOMATO_CLASSES
+from cropfed.constants import taxonomy_from_scope
 from cropfed.data.audit import audit_prepared_data, write_audit_report
 from cropfed.flower.smoke import validate_run_artifacts
 
@@ -53,8 +54,15 @@ def data_profile_name(partition_kind: str, dirichlet_alpha: float) -> str:
 
     if partition_kind == "iid":
         return "iid"
+    if partition_kind == "quantity_skew":
+        return "quantity-skew"
+    if partition_kind == "feature_skew":
+        return "feature-skew"
     if partition_kind != "dirichlet":
-        raise ValueError("partition_kind must be 'iid' or 'dirichlet'")
+        raise ValueError(
+            "partition_kind must be 'iid', 'dirichlet', 'quantity_skew', "
+            "or 'feature_skew'"
+        )
     if isclose(dirichlet_alpha, 0.5, rel_tol=0.0, abs_tol=1e-9):
         return "dirichlet-alpha-0.5"
     if isclose(dirichlet_alpha, 0.1, rel_tol=0.0, abs_tol=1e-9):
@@ -136,6 +144,7 @@ def execute_flower_experiment(
     if spec.num_clients != 4:
         raise ValueError("Flower MVP worker requires exactly four clients")
     project_root = application_settings.flower_project_dir.resolve()
+    taxonomy = taxonomy_from_scope(application_settings.taxonomy_scope)
     profile_name = data_profile_name(spec.partition_kind, spec.dirichlet_alpha)
     data_root = _resolve_from(project_root, application_settings.flower_data_root)
     profile_root = data_root / profile_name
@@ -157,6 +166,7 @@ def execute_flower_experiment(
         test_manifest=test_manifest,
         client_data_root=client_data_root,
         num_clients=spec.num_clients,
+        class_names=taxonomy.class_names,
     )
     audit_path = output_dir / "pre_run_data_audit.json"
     write_audit_report(audit_report, audit_path)
@@ -197,6 +207,7 @@ def execute_flower_experiment(
         expected_clients=spec.num_clients,
         proximal_mu=spec.proximal_mu,
         log_text=log_path.read_text(encoding="utf-8"),
+        expected_class_order=taxonomy.class_names,
     )
     metrics_path = output_dir / "metrics.json"
     if not metrics_path.is_file():
@@ -211,6 +222,14 @@ def execute_flower_experiment(
         num_clients=spec.num_clients,
         num_rounds=spec.num_rounds,
     )
+    selection = metrics_payload.get("selection")
+    if not isinstance(selection, dict) or not isinstance(
+        selection.get("best_round"), int
+    ):
+        raise RuntimeError("Flower validation checkpoint selection is missing")
+    global_test = metrics_payload.get("global_test")
+    if not isinstance(global_test, dict) or "global_test_macro_f1" not in global_test:
+        raise RuntimeError("Flower final global-test evaluation is missing")
     return {
         "result_kind": "flower_image_training_run",
         "research_result_valid": False,
@@ -222,12 +241,15 @@ def execute_flower_experiment(
             "num_train": audit_report["manifests"]["master_train"]["num_records"],
             "num_test": audit_report["manifests"]["global_test"]["num_records"],
             "class_order_matches": (
-                tuple(audit_report["taxonomy"]["class_order"]) == TOMATO_CLASSES
+                tuple(audit_report["taxonomy"]["class_order"])
+                == taxonomy.class_names
             ),
         },
         "flower": validation,
         "history": history,
         "client_history": client_history,
+        "selection": selection,
+        "global_test": global_test,
         "communication": metrics_payload.get("communication", {}),
         "artifact_directory": output_dir.name,
     }
@@ -252,9 +274,10 @@ def build_flower_command(
             "verbose=true",
             "backend='ray'",
             "client-resources-num-cpus=1",
-            "client-resources-num-gpus=0.0",
+            "client-resources-num-gpus="
+            f"{min(1.0, application_settings.flower_num_gpus)}",
             f"init-args-num-cpus={application_settings.flower_num_cpus}",
-            "init-args-num-gpus=0",
+            f"init-args-num-gpus={application_settings.flower_num_gpus}",
             "init-args-log-to-driver=true",
         ]
     )
@@ -262,6 +285,9 @@ def build_flower_command(
         [
             f"algorithm='{spec.algorithm}'",
             f"proximal-mu={spec.proximal_mu}",
+            "scaffold-server-lr=1.0",
+            "moon-temperature=0.5",
+            "moon-mu=1.0",
             f"partition-kind='{spec.partition_kind}'",
             f"dirichlet-alpha={spec.dirichlet_alpha}",
             "num-clients=4",
@@ -271,9 +297,10 @@ def build_flower_command(
             f"learning-rate={spec.learning_rate}",
             f"seed={spec.seed}",
             f"pretrained={str(application_settings.flower_pretrained).lower()}",
-            "model-name='mobilenet_v2'",
+            f"model-name='{application_settings.flower_model_name}'",
+            f"taxonomy-scope='{application_settings.taxonomy_scope}'",
             f"client-data-root={_toml_string(client_data_root)}",
-            f"central-test-manifest={_toml_string(test_manifest)}",
+            f"global-test-manifest={_toml_string(test_manifest)}",
             f"output-dir={_toml_string(output_dir)}",
             "save-model=true",
         ]
@@ -425,6 +452,39 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def cleanup_stale_running_experiments(
+    database_engine: Engine = engine,
+    max_stale_seconds: float = 3600.0,
+) -> int:
+    """Mark experiments left in 'running' status for over max_stale_seconds as failed."""
+
+    cutoff = datetime.now(UTC)
+    count = 0
+    with Session(database_engine) as session:
+        records = session.exec(
+            select(ExperimentRecord).where(ExperimentRecord.status == "running")
+        ).all()
+        for record in records:
+            updated_at = (
+                record.updated_at.replace(tzinfo=UTC)
+                if record.updated_at.tzinfo is None
+                else record.updated_at
+            )
+            elapsed = (cutoff - updated_at).total_seconds()
+            if elapsed > max_stale_seconds:
+                record.status = "failed"
+                record.error_message = (
+                    f"StaleWorkerError: experiment remained in running status "
+                    f"for {elapsed:.0f}s without worker heartbeat"
+                )
+                record.updated_at = cutoff
+                session.add(record)
+                count += 1
+        if count > 0:
+            session.commit()
+    return count
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
@@ -434,10 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    init_database()
+    upgrade_database(database_url=settings.database_url)
     if not settings.flower_worker_enabled:
         print("Flower worker is disabled; set CROPFED_FLOWER_WORKER_ENABLED=true")
         return 2
+    cleanup_stale_running_experiments(engine)
     poll_interval = args.poll_interval or settings.flower_poll_interval
     if poll_interval <= 0:
         raise ValueError("poll interval must be positive")

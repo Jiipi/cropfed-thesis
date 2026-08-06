@@ -17,7 +17,11 @@ from numpy.typing import NDArray
 
 from cropfed.config import ExperimentConfig
 from cropfed.data.partitioning import make_partitions, partition_statistics
-from cropfed.fl.aggregation import ClientUpdate, weighted_average_updates
+from cropfed.fl.aggregation import (
+    ClientUpdate,
+    ScaffoldServerState,
+    aggregate,
+)
 from cropfed.ml.metrics import classification_metrics
 
 FloatArray = NDArray[np.float64]
@@ -107,6 +111,10 @@ def run_synthetic_experiment(
     model_bytes = int(sum(array.nbytes for array in global_weights.values()))
     history: list[dict[str, Any]] = []
 
+    scaffold_state = ScaffoldServerState()
+    if config.algorithm == "scaffold":
+        scaffold_state.init_c(global_weights)
+
     for round_number in range(1, config.num_rounds + 1):
         round_started = time.perf_counter()
         updates: list[ClientUpdate] = []
@@ -129,7 +137,12 @@ def run_synthetic_experiment(
                     metrics={"train_loss": train_loss},
                 )
             )
-        global_weights = weighted_average_updates(updates)
+        global_weights = aggregate(
+            updates,
+            config.algorithm,
+            scaffold_state=scaffold_state,
+            server_lr=config.scaffold_server_lr,
+        )
         predictions = _predict(dataset.test_x, global_weights)
         global_metrics = classification_metrics(dataset.test_y, predictions, num_classes)
 

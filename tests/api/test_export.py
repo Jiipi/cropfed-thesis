@@ -29,7 +29,9 @@ class ResearchExportTests(unittest.TestCase):
                         "experiment_type": "centralized",
                         "model": "mobilenet_v2",
                         "seed": 2026,
+                        "research_result_valid": True,
                         "metrics": metrics,
+                        "class_order": list(TOMATO_CLASSES),
                         "elapsed_seconds": 1.5,
                         "checkpoint_bytes": 123,
                     }
@@ -118,6 +120,77 @@ class ResearchExportTests(unittest.TestCase):
                 "research_result_valid=false",
                 result["excluded"][0]["reason"],
             )
+
+    def test_flower_export_uses_one_shot_global_test_and_selected_round(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            flower = root / "flower-main"
+            flower.mkdir()
+            (flower / "run_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "result_kind": "federated_image_research_candidate",
+                        "research_result_valid": True,
+                        "experiment_type": "federated",
+                        "algorithm": "fedavg",
+                        "model": "mobilenet_v2",
+                        "seed": 2026,
+                        "partition_kind": "iid",
+                        "num_clients": 4,
+                        "num_rounds": 2,
+                        "class_order": list(TOMATO_CLASSES),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (flower / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "history": [
+                            {"round": 1, "federated_evaluate": {"eval_macro_f1": 0.7}},
+                            {"round": 2, "federated_evaluate": {"eval_macro_f1": 0.6}},
+                        ],
+                        "selection": {"best_round": 1},
+                        "global_test": {
+                            "global_test_accuracy": 0.85,
+                            "global_test_macro_precision": 0.81,
+                            "global_test_macro_recall": 0.82,
+                            "global_test_macro_f1": 0.83,
+                            "global_test_harmful_missed_as_healthy_rate": 0.05,
+                            "global_test_spider_mite_f1": 0.77,
+                            "global_test_confusion_matrix_size": 0,
+                        },
+                        "client_history": [
+                            {
+                                "round": 1,
+                                "phase": "evaluate",
+                                "client_id": client_id,
+                                "metrics": {"eval_macro_f1": 0.2 + client_id * 0.1},
+                            }
+                            for client_id in range(4)
+                        ]
+                        + [
+                            {
+                                "round": 2,
+                                "phase": "evaluate",
+                                "client_id": client_id,
+                                "metrics": {"eval_macro_f1": 0.9},
+                            }
+                            for client_id in range(4)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            export_results([flower], root / "export", project_root=root)
+            with (root / "export" / "comparison.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as handle:
+                comparison = next(csv.DictReader(handle))
+
+            self.assertEqual(float(comparison["macro_f1"]), 0.83)
+            self.assertEqual(float(comparison["worst_client_macro_f1"]), 0.2)
 
 
 if __name__ == "__main__":

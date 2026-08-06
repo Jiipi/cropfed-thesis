@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
-from cropfed.constants import TOMATO_CLASSES
 from cropfed.data.manifest import IMAGE_EXTENSIONS, ImageRecord, read_manifest
 
 
@@ -25,6 +25,7 @@ def audit_prepared_data(
     test_manifest: Path,
     client_data_root: Path | None = None,
     num_clients: int = 4,
+    class_names: Sequence[str],
 ) -> dict[str, Any]:
     """Audit image integrity, taxonomy, split isolation, and client assignment.
 
@@ -36,6 +37,11 @@ def audit_prepared_data(
 
     if num_clients < 2:
         raise ValueError("num_clients must be at least 2")
+    resolved_class_names = tuple(class_names)
+    if len(resolved_class_names) < 2 or len(set(resolved_class_names)) != len(
+        resolved_class_names
+    ):
+        raise ValueError("class_names must contain at least two unique names")
 
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -76,9 +82,9 @@ def audit_prepared_data(
 
         records_by_scope[scope] = records
         split_counts = Counter(record.split for record in records)
-        class_counts = [0] * len(TOMATO_CLASSES)
+        class_counts = [0] * len(resolved_class_names)
         for record in records:
-            if 0 <= record.label_id < len(TOMATO_CLASSES):
+            if 0 <= record.label_id < len(resolved_class_names):
                 class_counts[record.label_id] += 1
         manifest_summaries[scope] = {
             "sha256": _sha256_file(manifest_path),
@@ -119,9 +125,9 @@ def audit_prepared_data(
 
         invalid_taxonomy: list[str] = []
         for record in records:
-            if not 0 <= record.label_id < len(TOMATO_CLASSES):
+            if not 0 <= record.label_id < len(resolved_class_names):
                 invalid_taxonomy.append(record.image_id)
-            elif record.label_name != TOMATO_CLASSES[record.label_id]:
+            elif record.label_name != resolved_class_names[record.label_id]:
                 invalid_taxonomy.append(record.image_id)
         if invalid_taxonomy:
             _add_issue(
@@ -136,9 +142,9 @@ def audit_prepared_data(
         present = {
             record.label_id
             for record in records_by_scope.get(scope, [])
-            if 0 <= record.label_id < len(TOMATO_CLASSES)
+            if 0 <= record.label_id < len(resolved_class_names)
         }
-        missing_classes = sorted(set(range(len(TOMATO_CLASSES))) - present)
+        missing_classes = sorted(set(range(len(resolved_class_names))) - present)
         if missing_classes:
             _add_issue(
                 errors,
@@ -246,8 +252,8 @@ def audit_prepared_data(
         "generated_at": datetime.now(UTC).isoformat(),
         "status": "failed" if errors else "passed",
         "taxonomy": {
-            "num_classes": len(TOMATO_CLASSES),
-            "class_order": list(TOMATO_CLASSES),
+            "num_classes": len(resolved_class_names),
+            "class_order": list(resolved_class_names),
         },
         "manifests": manifest_summaries,
         "images": {
@@ -304,6 +310,8 @@ def _audit_client_assignment(
         return {"checked": False}
 
     client_records: list[tuple[str, ImageRecord]] = []
+    client_train_records: list[ImageRecord] = []
+    client_validation_records: list[ImageRecord] = []
     client_counts: list[dict[str, int]] = []
     empty_client_splits = 0
     for client_id in range(num_clients):
@@ -326,6 +334,8 @@ def _audit_client_assignment(
             _add_issue(errors, "client_validation_empty", client_id=client_id)
         client_records.extend((train_scope, record) for record in local_train)
         client_records.extend((val_scope, record) for record in local_val)
+        client_train_records.extend(local_train)
+        client_validation_records.extend(local_val)
 
     assignments: dict[str, list[str]] = defaultdict(list)
     for scope, record in client_records:
@@ -341,6 +351,39 @@ def _audit_client_assignment(
             "sample_assigned_to_multiple_client_splits",
             count=len(repeated_assignments),
             image_ids=sorted(repeated_assignments),
+        )
+
+    train_content_hashes = _content_hashes(client_train_records, image_inspections)
+    validation_content_hashes = _content_hashes(
+        client_validation_records, image_inspections
+    )
+    train_validation_content_overlap = sorted(
+        train_content_hashes & validation_content_hashes
+    )
+    if train_validation_content_overlap:
+        _add_issue(
+            errors,
+            "client_train_validation_content_overlap",
+            count=len(train_validation_content_overlap),
+            sha256=train_validation_content_overlap,
+        )
+
+    scopes_by_content: dict[str, set[str]] = defaultdict(set)
+    for scope, record in client_records:
+        inspection = image_inspections.get(_path_key(record.path))
+        if inspection is not None:
+            scopes_by_content[str(inspection["sha256"])].add(scope)
+    multi_scope_content = {
+        digest: sorted(scopes)
+        for digest, scopes in scopes_by_content.items()
+        if len(scopes) > 1
+    }
+    if multi_scope_content:
+        _add_issue(
+            errors,
+            "duplicate_content_assigned_to_multiple_client_scopes",
+            count=len(multi_scope_content),
+            sha256=sorted(multi_scope_content),
         )
 
     train_by_id = {record.image_id: record for record in train_records}
@@ -416,6 +459,8 @@ def _audit_client_assignment(
         "empty_client_splits": empty_client_splits,
         "global_test_image_id_overlap": len(client_test_id_overlap),
         "global_test_content_overlap": len(client_test_content_overlap),
+        "train_validation_content_overlap": len(train_validation_content_overlap),
+        "multi_scope_duplicate_content": len(multi_scope_content),
         "complete": not any(
             (
                 missing_ids,
@@ -425,6 +470,8 @@ def _audit_client_assignment(
                 empty_client_splits,
                 client_test_id_overlap,
                 client_test_content_overlap,
+                train_validation_content_overlap,
+                multi_scope_content,
             )
         ),
     }

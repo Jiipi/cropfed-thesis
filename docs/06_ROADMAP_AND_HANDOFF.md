@@ -6,10 +6,14 @@ Phiên bản nền `0.1.0` đã hoàn thành kiến trúc, baseline/Flower integ
 metric theo round và client được chuẩn hóa vào database, communication payload thực,
 exporter, dashboard, control plane API → database → worker → Flower và Compose local
 `db/api/web` có HTTPS cùng bearer auth viewer/admin. PlantVillage tomato thật đã
-được khóa provenance, tạo/audit đủ ba profile và chạy centralized pilot một epoch;
-artifact pilot không đủ điều kiện làm kết quả nghiên cứu. Việc đúng tiếp theo là
-hoàn tất local-only và Flower pilot trên cùng split rồi mới khóa hyperparameter;
-không mở rộng thuật toán.
+được khóa provenance, tạo/audit đủ ba profile; centralized, local-only α=0.5, Flower
+FedAvg IID một round và bốn Flower FedAvg/FedProx Non-IID (α=0.5/0.1) một round đều
+đã chạy pilot trên ảnh thật và bị verify bởi `scripts/verify_plantvillage_pilots.py`.
+Mọi artifact pilot bị khóa khỏi research export. Worker profile trên Docker Compose
+đã claim được experiment từ PostgreSQL, chạy data audit POSIX và spawn Flower; Alembic
+roundtrip và `pg_dump`/`pg_restore` đã được verify qua
+`scripts/backup_postgres_volume.py`. Việc đúng tiếp theo là khóa `μ` trên validation
+rồi khóa protocol; không mở rộng thuật toán.
 
 ## 2. Kế hoạch 14 tuần
 
@@ -44,7 +48,13 @@ Nếu chỉ có 10–12 tuần, giảm seed/model phụ trước; không bỏ ce
 6. [x] Chạy Flower 1 round/4 client cho FedAvg/FedProx, lưu log/checkpoint và sửa integration error.
 7. [x] Bổ sung local-only image runner và checkpoint version hóa.
 8. [x] Local-only PlantVillage pilot bốn client trên α=0.5 đã hoàn tất, đủ checkpoint/hash và bị khóa pilot-only.
-9. [ ] Chạy Flower FedAvg IID PlantVillage pilot 1 round.
+9. [x] Flower FedAvg IID PlantVillage pilot 1 round đã đủ 4/4 train/evaluate,
+   0 failure; central Macro-F1 0,9145, checkpoint/environment hash hợp lệ và bị
+   khóa pilot-only.
+10. [x] Pilot FedAvg/FedProx trên α=0.5 và α=0.1 hoàn tất 4/4 pilot với evidence
+    log + checksum + client_history đạt (`verify_plantvillage_pilots.py` `passed`).
+    Chọn `μ` trên validation và khóa số round/epoch/batch vẫn là việc tiếp theo
+    trước main study.
 
 ### P1 — Hoàn tất MVP
 
@@ -56,7 +66,7 @@ Nếu chỉ có 10–12 tuần, giảm seed/model phụ trước; không bỏ ce
 6. [x] Export comparison/per-class/confusion CSV, environment manifest, checksum; tự loại mọi synthetic smoke.
 7. [x] API/SQLite lifecycle, whitelist, worker success/failure và API-worker-Flower smoke đã có.
 8. [x] Compose local `db/api/web` build/up healthy; HTTPS, security headers và role gate 401/403 đã kiểm chứng.
-9. [ ] Chạy Flower worker profile trên PostgreSQL; kiểm thử migration/backup/restore và TLS/node auth trước triển khai nhiều máy.
+9. [x] Flower worker profile trên PostgreSQL chạy end-to-end: API `start` → worker claim → audit → Flower spawn; Alembic roundtrip `base ↔ 0001_initial ↔ 0002_clients`; `scripts/backup_postgres_volume.py` đã verify restore schema 5 bảng. Còn recovery job treo + multi-worker locking stress + TLS/node auth.
 
 ### P2 — Chỉ sau MVP
 

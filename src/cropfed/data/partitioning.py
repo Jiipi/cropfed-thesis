@@ -94,14 +94,212 @@ def make_partitions(
     alpha: float = 0.5,
     seed: int = 2026,
     min_size: int = 1,
+    quantity_skew: bool = False,
+    feature_skew_strength: float = 0.5,
 ) -> list[IndexArray]:
+    # ``quantity_skew`` is the profile-level flag; ``kind="quantity_skew"`` is the
+    # equivalent request-level name used by the API, CLI and config boundary.
+    if kind == "quantity_skew":
+        kind, quantity_skew = "iid", True
+    if kind == "feature_skew":
+        if quantity_skew:
+            raise ValueError("quantity_skew cannot be combined with feature_skew")
+        return feature_skew_partition(
+            labels, num_clients, feature_skew_strength, seed, min_size=min_size
+        )
+    if quantity_skew and kind != "iid":
+        raise ValueError(
+            "quantity_skew cannot be combined with Dirichlet label skew; "
+            "use an explicit quantity-skew-only profile"
+        )
     if kind == "iid":
-        return iid_partition(labels, num_clients, seed)
-    if kind == "dirichlet":
-        return dirichlet_partition(
+        partitions = iid_partition(labels, num_clients, seed)
+    elif kind == "dirichlet":
+        partitions = dirichlet_partition(
             labels, num_clients, alpha, seed, min_size=min_size
         )
-    raise ValueError("kind must be 'iid' or 'dirichlet'")
+    else:
+        raise ValueError(
+            "kind must be 'iid', 'dirichlet', 'quantity_skew', or 'feature_skew'"
+        )
+    if quantity_skew:
+        partitions = _apply_quantity_skew(partitions, seed, min_size=min_size)
+    return partitions
+
+
+def _apply_quantity_skew(
+    partitions: list[IndexArray], seed: int, min_size: int = 1
+) -> list[IndexArray]:
+    """Redistribute every sample into deliberately unequal client shares.
+
+    Quantity skew (lệch số lượng) varies how *much* data each site holds while
+    leaving label proportions alone.  No index is dropped or duplicated.
+
+    ``min_size`` is a floor on each client's share.  The caller partitions
+    content groups rather than raw images, and a client left with a single
+    group cannot be split into local train and validation, so the floor is a
+    correctness requirement downstream rather than a cosmetic one.
+    """
+
+    if not partitions:
+        return partitions
+    all_indices = np.concatenate(partitions)
+    num_clients = len(partitions)
+    total = all_indices.size
+    if total == 0 or num_clients == 0:
+        return partitions
+    if min_size < 1:
+        raise ValueError("min_size must be at least 1")
+    if min_size * num_clients > total:
+        raise ValueError("min_size is impossible for the given sample count")
+
+    rng = np.random.default_rng(seed + 999)
+    shuffled = rng.permutation(all_indices)
+
+    proportions = rng.dirichlet(np.full(num_clients, 0.5))
+    proportions = np.maximum(proportions, 0.05)
+    proportions /= proportions.sum()
+
+    # Allocate only the slack above the floor, so the floor cannot be undone by
+    # the rounding-repair loop below.
+    slack = total - min_size * num_clients
+    sizes = min_size + np.floor(proportions * slack).astype(int)
+
+    diff = total - int(sizes.sum())
+    for offset in range(max(0, diff)):
+        sizes[offset % num_clients] += 1
+    for _ in range(max(0, -diff)):
+        largest = int(np.argmax(sizes))
+        if sizes[largest] <= min_size:
+            break
+        sizes[largest] -= 1
+
+    result: list[IndexArray] = []
+    offset = 0
+    for size in sizes:
+        result.append(shuffled[offset : offset + size])
+        offset += size
+    _assert_complete_partition(result, total)
+    return result
+
+
+def feature_skew_partition(
+    labels: Sequence[int],
+    num_clients: int,
+    strength: float = 0.5,
+    seed: int = 2026,
+    min_size: int = 1,
+) -> list[IndexArray]:
+    """Partition each class into disjoint, unevenly sized per-client instance blocks.
+
+    Scope, stated precisely so the thesis does not overclaim: this is a
+    *sampling-level* approximation of feature skew (lệch đặc trưng).  Each client
+    receives a different, non-overlapping subset of instances **within** every
+    class, so per-client feature distributions differ through which photographs
+    each site holds.  It does **not** modify pixels, so it does not reproduce a
+    true covariate shift such as a different camera, illumination or background;
+    that would require a per-client image transform in the data loader.
+
+    ``strength`` controls how uneven the per-class blocks are: 0.0 gives nearly
+    equal blocks (close to IID), 1.0 gives strongly unequal ones.  Label
+    proportions stay approximately balanced by construction — that is what
+    separates this from Dirichlet label skew.
+
+    ``min_size`` is a floor on each client's share.  Uneven per-class blocks can
+    otherwise leave a client with a single content group, which cannot be split
+    into local train and validation downstream.
+    """
+
+    label_array = _validate_inputs(labels, num_clients)
+    if not 0.0 <= strength <= 1.0:
+        raise ValueError("feature_skew_strength must be between 0 and 1")
+    if min_size < 1:
+        raise ValueError("min_size must be at least 1")
+    if min_size * num_clients > label_array.size:
+        raise ValueError("min_size is impossible for the given sample count")
+
+    rng = np.random.default_rng(seed)
+    classes = np.unique(label_array)
+
+    client_indices: list[list[int]] = [[] for _ in range(num_clients)]
+
+    for class_position, class_id in enumerate(classes):
+        class_indices = np.flatnonzero(label_array == class_id)
+        rng.shuffle(class_indices)
+
+        # A class may contain fewer samples than clients in small fixtures or
+        # rare-class datasets. Rotate those samples across clients so no fixed
+        # client is starved for every rare class.
+        if len(class_indices) < num_clients:
+            splits = [np.asarray([], dtype=np.int64) for _ in range(num_clients)]
+            for offset, sample_index in enumerate(class_indices):
+                client_id = (class_position + offset) % num_clients
+                splits[client_id] = np.asarray([sample_index], dtype=np.int64)
+        # Split the class samples into num_clients consecutive blocks.
+        # Higher strength = more extreme block sizes.
+        elif strength <= 0.01:
+            # Near-IID: roughly equal splits
+            splits = np.array_split(class_indices, num_clients)
+        else:
+            # Create uneven splits proportional to strength
+            remaining = len(class_indices)
+            splits = []
+            for client_id in range(num_clients):
+                if client_id == num_clients - 1:
+                    size = remaining
+                else:
+                    # Base allocation + strength-weighted variation
+                    base = remaining / (num_clients - client_id)
+                    variation = base * strength * rng.uniform(-0.5, 0.5)
+                    size = max(1, int(base + variation))
+                    size = min(size, remaining - (num_clients - client_id - 1))
+                start = len(class_indices) - remaining
+                splits.append(class_indices[start : start + size])
+                remaining -= size
+
+        for client_id, split in enumerate(splits):
+            client_indices[client_id].extend(split.tolist())
+
+    partitions = []
+    for indices in client_indices:
+        rng.shuffle(indices)
+        partitions.append(np.asarray(indices, dtype=np.int64))
+
+    partitions = _enforce_min_size(partitions, min_size, rng)
+    _assert_complete_partition(partitions, label_array.size)
+    return partitions
+
+
+def _enforce_min_size(
+    partitions: list[IndexArray], min_size: int, rng: np.random.Generator
+) -> list[IndexArray]:
+    """Move samples from the largest clients until every client clears ``min_size``.
+
+    Only the deficit is moved, so the intended skew is preserved as far as the
+    floor allows.  Donors are chosen largest-first and are never taken below the
+    floor themselves.
+    """
+
+    if min_size <= 1:
+        return partitions
+    working = [list(part.tolist()) for part in partitions]
+    for client_id, indices in enumerate(working):
+        while len(indices) < min_size:
+            donor = max(
+                range(len(working)),
+                key=lambda other: len(working[other]) if other != client_id else -1,
+            )
+            if len(working[donor]) <= min_size:
+                raise ValueError(
+                    "cannot satisfy min_size without starving another client; "
+                    "reduce num_clients or min_size"
+                )
+            indices.append(working[donor].pop())
+    result = []
+    for indices in working:
+        rng.shuffle(indices)
+        result.append(np.asarray(indices, dtype=np.int64))
+    return result
 
 
 def partition_statistics(

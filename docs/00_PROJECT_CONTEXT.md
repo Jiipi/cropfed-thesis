@@ -145,6 +145,9 @@ Thứ tự ID là contract giữa dataset, model, API và báo cáo. Không sắ
   tất, checkpoint/hash hợp lệ và được khóa `research_result_valid=false`;
 - local-only α=0.5 pilot đủ bốn client đã hoàn tất, mọi checkpoint/hash hợp lệ và
   được khóa `research_result_valid=false`;
+- Flower FedAvg IID PlantVillage pilot một round đã hoàn tất đủ 4/4 train và
+  evaluate reply, central Macro-F1 0,9145; checkpoint/environment hash hợp lệ và
+  được khóa `research_result_valid=false`;
 - local single-image inference;
 - FastAPI experiment API; worker riêng claim Flower job bằng profile/argv whitelist; DB lưu round và client-phase metric;
 - React dashboard cho status, metric nguy cơ, communication, Macro-F1 curve, confusion matrix và heatmap phân bố client;
@@ -152,14 +155,14 @@ Thứ tự ID là contract giữa dataset, model, API và báo cáo. Không sắ
 - bearer authentication phân quyền viewer/admin, TLS local qua Nginx và secret
   generator không ghi đè;
 - Docker Compose `db/api/web` đã build/up thật và cả ba healthcheck đạt;
-- 58 test + 2 subtest (gồm Torch, data profile/audit, metric nguy cơ,
+- 60 test + 2 subtest (gồm Torch, data profile/audit, metric nguy cơ,
   FastAPI/SQLite, auth/secrets/Compose contract, worker và Flower result),
   compile/lint check và frontend build.
 
 Chưa hoàn tất:
 
-- hoàn tất local-only/Flower pilot PlantVillage, chốt hyperparameter rồi chạy main
-  matrix nhiều seed;
+- pilot FedAvg/FedProx trên α=0.5/0.1, chốt protocol rồi chạy main matrix nhiều
+  seed;
 - chạy Flower worker profile trên PostgreSQL và kiểm thử migration/backup/restore;
 - inference UI tại client;
 - Flower TLS/node authentication, rate limit, secret rotation và deployment nhiều máy;

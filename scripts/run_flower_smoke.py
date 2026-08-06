@@ -17,6 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 # The repository source is intentionally bootstrapped before project imports.
 from create_flower_smoke_fixture import create_fixture  # noqa: E402
 
+from cropfed.constants import TOMATO_CLASSES  # noqa: E402
 from cropfed.flower.smoke import (  # noqa: E402
     compare_checkpoint_states,
     strip_ansi,
@@ -63,7 +64,7 @@ def _run_config(
             "seed=2026",
             "pretrained=false",
             f"client-data-root='{(fixture_root / 'clients').as_posix()}'",
-            "central-test-manifest="
+            "global-test-manifest="
             f"'{(fixture_root / 'processed' / 'test_manifest.csv').as_posix()}'",
             f"output-dir='{output_dir.as_posix()}'",
             "save-model=true",
@@ -104,6 +105,7 @@ def run_one(
             algorithm=algorithm,
             expected_clients=NUM_CLIENTS,
             proximal_mu=PROXIMAL_MU,
+            expected_class_order=TOMATO_CLASSES,
             log_text=log_path.read_text(encoding="utf-8"),
         )
         validation["log"] = log_path.name
@@ -167,6 +169,7 @@ def run_one(
         algorithm=algorithm,
         expected_clients=NUM_CLIENTS,
         proximal_mu=PROXIMAL_MU,
+        expected_class_order=TOMATO_CLASSES,
         log_text=clean_log,
     )
     validation["elapsed_seconds"] = elapsed

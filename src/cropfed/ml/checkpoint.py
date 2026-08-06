@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cropfed.constants import PROJECT_VERSION, TOMATO_CLASSES
+from cropfed.constants import PROJECT_VERSION
 
 CHECKPOINT_FORMAT_VERSION = 1
 CHECKPOINT_KIND = "cropfed_image_classifier"
@@ -31,6 +31,7 @@ def save_model_checkpoint(
     *,
     model_name: str,
     metadata: Mapping[str, Any] | None = None,
+    class_order: tuple[str, ...],
 ) -> dict[str, Any]:
     """Save CPU weights with the class contract and reproducibility metadata."""
 
@@ -38,6 +39,11 @@ def save_model_checkpoint(
 
     if not model_name:
         raise ValueError("model_name cannot be empty")
+    resolved_class_order = tuple(class_order)
+    if len(resolved_class_order) < 2 or len(set(resolved_class_order)) != len(
+        resolved_class_order
+    ):
+        raise ValueError("class_order must contain at least two unique names")
     destination.parent.mkdir(parents=True, exist_ok=True)
     state_dict = {
         name: tensor.detach().cpu()
@@ -48,7 +54,7 @@ def save_model_checkpoint(
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "model_version": PROJECT_VERSION,
         "model_name": model_name,
-        "class_order": list(TOMATO_CLASSES),
+        "class_order": list(resolved_class_order),
         "created_at": datetime.now(UTC).isoformat(),
         "metadata": dict(metadata or {}),
         "state_dict": state_dict,
@@ -84,8 +90,8 @@ def load_model_checkpoint(path: Path) -> LoadedCheckpoint:
         if not _looks_like_state_dict(state_dict):
             raise ValueError("checkpoint state_dict is missing or invalid")
         class_order = tuple(str(item) for item in payload.get("class_order", ()))
-        if class_order != TOMATO_CLASSES:
-            raise ValueError("checkpoint class order does not match project taxonomy")
+        if len(class_order) < 2 or len(set(class_order)) != len(class_order):
+            raise ValueError("checkpoint class order is missing or invalid")
         return LoadedCheckpoint(
             state_dict=state_dict,
             format_version=format_version,

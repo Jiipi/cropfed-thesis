@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from cropfed.constants import PROJECT_VERSION, TOMATO_CLASSES
+from cropfed.constants import PROJECT_VERSION
 
 COMPARISON_FIELDS = (
     "run_id",
@@ -202,25 +202,39 @@ def _load_candidate(path: Path) -> dict[str, Any]:
 
 def _exclusion_reason(path: Path, candidate: dict[str, Any]) -> str | None:
     result = candidate.get("result", {})
+    manifest = candidate.get("manifest", {})
+
     if isinstance(result, dict):
         result_kind = str(result.get("result_kind", "")).lower()
         if "synthetic" in result_kind:
             return "synthetic smoke results are forbidden in research exports"
-        if result.get("research_result_valid") is False:
-            return "run is explicitly marked research_result_valid=false"
-    manifest = candidate.get("manifest", {})
     if isinstance(manifest, dict):
         result_kind = str(manifest.get("result_kind", "")).lower()
         if "synthetic" in result_kind:
             return "synthetic Flower results are forbidden in research exports"
-        if manifest.get("research_result_valid") is False:
-            return "Flower run is explicitly marked research_result_valid=false"
+
     for ancestor in (path if path.is_dir() else path.parent, *path.parents):
         fixture_path = ancestor / "fixture.json"
         if fixture_path.is_file():
             fixture = _read_json(fixture_path)
             if fixture.get("fixture_kind") == "synthetic_images_for_integration_only":
                 return "Flower run belongs to a synthetic image fixture"
+
+    valid_in_result = (
+        result.get("research_result_valid") if isinstance(result, dict) else None
+    )
+    valid_in_manifest = (
+        manifest.get("research_result_valid") if isinstance(manifest, dict) else None
+    )
+    is_valid = valid_in_result if valid_in_result is not None else valid_in_manifest
+
+    if is_valid is False:
+        return "run is explicitly marked research_result_valid=false"
+    if is_valid is not True:
+        return (
+            "run is not explicitly validated as a research candidate "
+            "(research_result_valid must be True)"
+        )
     return None
 
 
@@ -251,7 +265,9 @@ def _normalize_centralized(path: Path, result: dict[str, Any]) -> dict[str, Any]
     )
     return {
         "comparison": comparison,
-        "per_class": _per_class_from_rich(run_id, metrics),
+        "per_class": _per_class_from_rich(
+            run_id, metrics, class_order=_require_class_order(result, run_id)
+        ),
         "confusion": _confusion_rows(run_id, metrics.get("confusion_matrix", [])),
     }
 
@@ -274,12 +290,14 @@ def _normalize_local_only(path: Path, result: dict[str, Any]) -> dict[str, Any]:
         }
     )
     per_class: list[dict[str, Any]] = []
+    class_order = _require_class_order(result, run_id)
     for client in result.get("clients", []):
         per_class.extend(
             _per_class_from_rich(
                 run_id,
                 client.get("global_test_metrics", {}),
                 client_id=int(client["client_id"]),
+                class_order=class_order,
             )
         )
     return {"comparison": comparison, "per_class": per_class, "confusion": []}
@@ -291,17 +309,28 @@ def _normalize_flower(
     metrics_payload: dict[str, Any],
 ) -> dict[str, Any]:
     history = metrics_payload.get("history", [])
-    final = next(
-        (
-            row.get("central_evaluate", {})
-            for row in reversed(history)
-            if row.get("central_evaluate")
-        ),
-        {},
+    recorded_global_test = metrics_payload.get("global_test")
+    if isinstance(recorded_global_test, dict) and recorded_global_test:
+        final = recorded_global_test
+        prefix = "global_test_"
+    else:
+        final = next(
+            (
+                row.get("central_evaluate", {})
+                for row in reversed(history)
+                if row.get("central_evaluate")
+            ),
+            {},
+        )
+        prefix = "central_"
+    selection = metrics_payload.get("selection", {})
+    selected_round = (
+        int(selection["best_round"])
+        if isinstance(selection, dict) and selection.get("best_round") is not None
+        else None
     )
     algorithm = str(manifest["algorithm"])
     run_id = _run_id(path, algorithm, manifest.get("seed"))
-    prefix = "central_"
     comparison = _base_comparison(run_id, path, manifest)
     comparison.update(
         {
@@ -312,7 +341,8 @@ def _normalize_flower(
             "macro_recall": final.get(f"{prefix}macro_recall"),
             "macro_f1": final.get(f"{prefix}macro_f1"),
             "worst_client_macro_f1": _worst_client_f1(
-                metrics_payload.get("client_history", [])
+                metrics_payload.get("client_history", []),
+                round_number=selected_round,
             ),
             "harmful_missed_as_healthy_rate": final.get(
                 f"{prefix}harmful_missed_as_healthy_rate"
@@ -331,7 +361,7 @@ def _normalize_flower(
             "checkpoint_bytes": manifest.get("checkpoint_bytes"),
         }
     )
-    class_order = manifest.get("class_order", list(TOMATO_CLASSES))
+    class_order = _require_class_order(manifest, run_id)
     per_class = _per_class_from_flat(run_id, final, class_order, prefix)
     size = int(final.get(f"{prefix}confusion_matrix_size", 0))
     flat = final.get(f"{prefix}confusion_matrix_flat", [])
@@ -364,7 +394,14 @@ def _base_comparison(
 
 def _common_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     per_class = metrics.get("per_class", {})
-    spider = per_class.get("Two-spotted spider mite", {})
+    spider = next(
+        (
+            value
+            for name, value in per_class.items()
+            if "spider mite" in name.lower()
+        ),
+        {},
+    )
     return {
         "accuracy": metrics.get("accuracy"),
         "macro_precision": metrics.get("macro_precision"),
@@ -377,11 +414,31 @@ def _common_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _require_class_order(
+    source: dict[str, Any], run_id: str
+) -> list[str]:
+    """Return the run's own class order, refusing to guess it.
+
+    Substituting a default taxonomy here would silently mislabel every
+    per-class row of a run trained on a different taxonomy, which is worse
+    than failing the export.
+    """
+
+    class_order = source.get("class_order")
+    if not class_order:
+        raise ValueError(
+            f"run {run_id!r} has no 'class_order'; re-export it from a "
+            "checkpoint that records its taxonomy instead of assuming one"
+        )
+    return list(class_order)
+
+
 def _per_class_from_rich(
     run_id: str,
     metrics: dict[str, Any],
     *,
     client_id: int | None = None,
+    class_order: list[str] | tuple[str, ...],
 ) -> list[dict[str, Any]]:
     per_class = metrics.get("per_class", {})
     return [
@@ -395,7 +452,7 @@ def _per_class_from_rich(
             "f1": per_class.get(name, {}).get("f1"),
             "support": per_class.get(name, {}).get("support"),
         }
-        for class_id, name in enumerate(TOMATO_CLASSES)
+        for class_id, name in enumerate(class_order)
     ]
 
 
@@ -437,19 +494,25 @@ def _confusion_rows(run_id: str, matrix: list[list[Any]]) -> list[dict[str, Any]
     ]
 
 
-def _worst_client_f1(client_history: object) -> float | None:
+def _worst_client_f1(
+    client_history: object,
+    *,
+    round_number: int | None = None,
+) -> float | None:
     if not isinstance(client_history, list):
         return None
-    final_round = max(
-        (int(item["round"]) for item in client_history if isinstance(item, dict)),
-        default=0,
-    )
+    selected_round = round_number
+    if selected_round is None:
+        selected_round = max(
+            (int(item["round"]) for item in client_history if isinstance(item, dict)),
+            default=0,
+        )
     values = [
         float(item.get("metrics", {}).get("eval_macro_f1"))
         for item in client_history
         if isinstance(item, dict)
         and item.get("phase") == "evaluate"
-        and int(item.get("round", 0)) == final_round
+        and int(item.get("round", 0)) == selected_round
         and item.get("metrics", {}).get("eval_macro_f1") is not None
     ]
     return min(values) if values else None
