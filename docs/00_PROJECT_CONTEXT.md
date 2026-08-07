@@ -11,8 +11,9 @@ Không được đổi tên, rút gọn tên trong bìa báo cáo, hoặc chuy�
 ## 2. Cách diễn giải bài toán đã khóa
 
 - “Phát hiện qua ảnh” trong phiên bản đồ án = **phân loại đa lớp ở mức toàn ảnh**.
-- Input: một ảnh lá cà chua.
-- Output: xác suất và nhãn của một trong 10 lớp sâu/bệnh/khỏe.
+- Input: một ảnh lá cây trồng.
+- Output: xác suất và nhãn của một trong 38 lớp sâu/bệnh/khỏe (xem §6; phạm vi 10
+  lớp cà chua là mốc 0.1.0, đã được thay bằng D-037).
 - Không có bounding box, mask hay đếm số côn trùng trong MVP.
 - Cách diễn giải này phù hợp với bài báo *Image-based crop disease detection with federated learning* (Scientific Reports, 2023): tiêu đề dùng “detection” nhưng thí nghiệm thực hiện crop disease classification.
 
@@ -54,7 +55,23 @@ Các câu trên là giả thuyết cần kiểm chứng, không phải kết lu�
 
 ## 6. Phạm vi dữ liệu và lớp
 
-Dataset chính: **PlantVillage, riêng nhóm cà chua**.
+Dataset chính: **PlantVillage bản đầy đủ, 38 lớp trên 14 loại cây** (D-037,
+06/08/2026). Bảng 10 lớp cà chua bên dưới là phạm vi mốc 0.1.0, giữ lại vì mọi
+checkpoint và artifact trước 06/08 dùng đúng thứ tự ID đó.
+
+Taxonomy hiện hành nằm ở `constants.py: PLANTVILLAGE_FULL_TAXONOMY`
+(`scope="plantvillage-full"`) — **38 lớp: 25 disease, 12 healthy, 1 pest**
+(Two-spotted spider mite). 14 cây: Apple, Bell pepper, Blueberry, Cherry, Corn,
+Grape, Orange, Peach, Potato, Raspberry, Soybean, Squash, Strawberry, Tomato.
+Trên dữ liệu thật, seed 2026: 54.305 ảnh chia **43.447 development pool / 10.858
+global test**; trong pool đó có **34.757 local train + 8.690 local validation**.
+
+Thứ tự lớp là contract, không sắp xếp lại sau khi đã tạo checkpoint. Hai taxonomy
+cùng tồn tại là có chủ đích: `taxonomy_from_class_order` nhận diện checkpoint cũ
+thuộc taxonomy nào và trả `None` khi không khớp cái nào, thay vì ngầm giả định một
+cái — nhầm taxonomy sẽ cho ra nhãn sai mà vẫn chạy trót lọt.
+
+### Phạm vi mốc 0.1.0 — PlantVillage nhóm cà chua, 10 lớp (`scope="tomato"`)
 
 | ID | Nhãn chuẩn trong code | Loại |
 |---:|---|---|
@@ -74,19 +91,26 @@ Thứ tự ID là contract giữa dataset, model, API và báo cáo. Không sắ
 ## 7. Cấu hình chuẩn
 
 - Cross-silo simulation: 4 client đại diện 4 cơ sở.
-- Phân phối: IID; Dirichlet label skew `α=0.5`; Dirichlet label skew `α=0.1`.
+- Phân phối: **6 profile** — IID; Dirichlet label skew `α=100`, `α=0.5`, `α=0.1`;
+  quantity skew; feature skew. `α=100` được thêm theo §6 đề cương để có một mức
+  "gần IID nhưng không phải IID": nếu không có nó, bước nhảy từ IID sang `α=0.5`
+  là bước duy nhất và không nói được đường suy giảm bắt đầu từ đâu.
 - Model chính: MobileNetV2 với transfer learning ImageNet.
-- Đối chiếu bắt buộc: local-only, centralized, FedAvg, FedProx.
+- Đối chiếu bắt buộc: local-only, centralized, FedAvg, FedProx. **Mở rộng theo
+  D-030**: thêm FedBN, SCAFFOLD, MOON — §2/§5 GĐ3 đề cương yêu cầu, và code đã cài
+  5 thuật toán trong khi D-007 mới chốt 4.
 - Model phụ nếu còn thời gian: ResNet18.
 - Seed phát triển: `2026`.
 - Báo cáo chính thức: ưu tiên ba seed `2026, 2027, 2028`; nếu tài nguyên không đủ phải ghi rõ giới hạn.
 - Global test: tách trước khi phân dữ liệu cho client.
-- Metric chính: macro F1; kèm accuracy, macro precision/recall, per-class recall/F1, confusion matrix, worst-client F1.
+- Metric chính: macro F1; kèm accuracy, macro precision/recall, per-class recall/F1,
+  confusion matrix, worst-client F1, **độ lệch giữa client (std/spread) và khoảng
+  cách vs centralized** (D-036 — worst-client F1 là sàn, không phải độ lệch).
 - Metric hệ thống: thời gian, round hội tụ, model bytes, tổng upload/download.
 
 ## 8. MVP bắt buộc
 
-1. Chuẩn bị manifest và kiểm tra 10 lớp.
+1. Chuẩn bị manifest và kiểm tra taxonomy (38 lớp; 10 lớp ở mốc 0.1.0).
 2. Tạo bốn client IID/Non-IID tái lập bằng seed.
 3. Centralized MobileNetV2.
 4. Flower FedAvg.
@@ -99,22 +123,27 @@ Thứ tự ID là contract giữa dataset, model, API và báo cáo. Không sắ
 
 ## 9. Nâng cao, chỉ làm sau MVP
 
-- SCAFFOLD hoặc FedAdam/FedYogi.
+- ~~SCAFFOLD hoặc FedAdam/FedYogi~~ — SCAFFOLD **đã vào phạm vi chính** (D-030).
 - Secure Aggregation.
-- Differential Privacy với báo cáo epsilon/delta.
+- Differential Privacy với báo cáo epsilon/delta. `fl/privacy.py` đã tồn tại nhưng
+  **chưa được gọi từ đâu và chưa có test**, nên đây vẫn là "chưa có", không phải
+  "đã có" (D-014).
 - Client dropout/straggler.
 - PlantWild/PlantDoc để đánh giá domain shift.
 - Triển khai thật trên nhiều máy.
 - Object detection/segmentation.
-- Mobile app/edge quantization.
+- Mobile app/edge quantization. `ml/quantization.py` cũng đã tồn tại nhưng chưa nối
+  vào CLI/script nào — cùng tình trạng như trên.
 
 ## 10. Ngoài phạm vi
 
 - Chẩn đoán y khoa/nông học thay chuyên gia.
 - Khuyến nghị thuốc và liều lượng.
 - Thu thập dữ liệu thật từ nông dân nếu chưa có quy trình đồng ý.
-- Blockchain, IoT sensor, drone video, multi-crop trong MVP.
-- So sánh quá nhiều backbone/thuật toán làm loãng câu hỏi Non-IID.
+- Blockchain, IoT sensor, drone video trong MVP. (Multi-crop đã vào phạm vi chính từ
+  D-037: 14 loại cây, nhưng vẫn là **một** bài toán phân loại chứ không phải nhiều
+  pipeline riêng.)
+- So sánh quá nhiều backbone làm loãng câu hỏi Non-IID.
 
 ## 11. Ranh giới quyền riêng tư
 
@@ -167,6 +196,31 @@ Chưa hoàn tất:
 - inference UI tại client;
 - Flower TLS/node authentication, rate limit, secret rotation và deployment nhiều máy;
 - ba seed và bảng/biểu đồ báo cáo.
+
+### 12.1 Thêm sau mốc 0.1.0 (06–07/08/2026)
+
+Mục 12 ở trên là ảnh chụp mốc 0.1.0, giữ nguyên. Từ đó tới nay:
+
+- **taxonomy 38 lớp** thay cho 10 lớp cà chua (D-037), 43.447 train / 10.858 test;
+- **6 profile** thay cho 3: thêm `dirichlet-alpha-100`, `quantity-skew`,
+  `feature-skew`, tất cả dùng chung một global test set (D-024 kiểm lại trên đĩa);
+- **5 thuật toán** thay cho 4: FedBN/SCAFFOLD/MOON thực sự chạy đúng thuật toán và
+  server raise nếu thiếu trạng thái, thay vì âm thầm chạy như FedAvg (D-030, D-031);
+- **launcher main study** chạy được 15 scenario, metadata phân hoạch đọc từ
+  `profile.json` chứ không suy từ tên thư mục (D-032);
+- **artifact chạy được trên máy khác**: manifest dùng path tương đối theo dataset
+  root cấp lúc chạy, thiếu root thì raise; sinh protocol lock cho cả 15 scenario
+  (D-033, D-034, D-035);
+- **metric fairness và gap**: độ lệch giữa client (std/spread) và khoảng cách vs
+  centralized thành cột, thay vì chỉ có worst-client F1 (D-036);
+- **230 test + 128 subtest** thay cho 60 + 2.
+
+Hai module đã tồn tại nhưng **chưa nối vào đâu và chưa có test**:
+`fl/privacy.py` và `ml/quantization.py`. Chúng nằm ở §9 (nâng cao), không ở §12
+(đã có) — có file không đồng nghĩa với có năng lực.
+
+Danh sách khoảng cách còn lại so với đề cương:
+[12_PROPOSAL_GAP_CHECKLIST.md](12_PROPOSAL_GAP_CHECKLIST.md).
 
 Chi tiết truy vết: [08_TRACEABILITY_MATRIX.md](08_TRACEABILITY_MATRIX.md).
 Kết quả kiểm thử tại mốc bàn giao: [10_TEST_REPORT.md](10_TEST_REPORT.md).

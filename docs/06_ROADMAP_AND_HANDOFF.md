@@ -1,5 +1,13 @@
 # 06 — Lộ trình và bàn giao ngữ cảnh
 
+> **Trạng thái 07/08/2026.** Mục 1 dưới đây là ảnh chụp mốc `0.1.0`, giữ nguyên làm
+> mốc lịch sử. Từ đó tới nay phạm vi đã mở: **38 lớp** thay 10 lớp cà chua (D-037),
+> **6 profile** thay 3, **5 thuật toán** thay 4 (D-030), artifact chạy được trên máy
+> GPU khác (D-033–D-035), và metric fairness/gap đã có (D-036). Câu cuối mục 1
+> ("không mở rộng thuật toán") đã bị D-030 thay thế: đề cương §2/§5 GĐ3 yêu cầu đủ 5
+> thuật toán, và code lúc đó đã cài 5 trong khi D-007 mới chốt 4. Xem
+> [12_PROPOSAL_GAP_CHECKLIST.md](12_PROPOSAL_GAP_CHECKLIST.md) và §8 dưới đây.
+
 ## 1. Mốc hiện tại
 
 Phiên bản nền `0.1.0` đã hoàn thành kiến trúc, baseline/Flower integration smoke ảnh,

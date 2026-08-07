@@ -18,6 +18,12 @@ Lệnh:
 Kết quả: **60 test + 2 subtest đạt**; có một cảnh báo deprecation từ
 `fastapi.testclient`/Starlette ở dependency, không có test failure.
 
+> **Cập nhật 07/08/2026.** Con số 60 là ảnh chụp mốc 0.1.0, giữ nguyên làm mốc
+> lịch sử. Trạng thái hiện hành: **230 test đạt / 128 subtest**, 31,58s
+> (`pytest tests -q`, venv lõi Python 3.13) — 73 ở `tests/unit`, 60 ở
+> `tests/flower`, 55 ở `tests/api`, 42 ở `tests/system`. Các mục dưới đây liệt kê
+> phạm vi tại mốc 0.1.0; phần thêm từ đó ghi ở "Phạm vi bổ sung sau mốc 0.1.0".
+
 Phạm vi:
 
 - FedAvg weighted aggregation;
@@ -60,6 +66,37 @@ Phạm vi:
 - Flower strategy fail-fast nếu số valid reply ít hơn số node đã gửi;
 - exporter tạo comparison/per-class/confusion/environment/checksum, loại synthetic
   result và loại Flower run có `research_result_valid=false`;
+
+### Phạm vi bổ sung sau mốc 0.1.0
+
+Ghi theo mục của `12_PROPOSAL_GAP_CHECKLIST.md`, để chỗ nào cũng dẫn về cùng một
+bằng chứng:
+
+- **B (06/08)** — SCAFFOLD truyền control variate qua ArrayRecord riêng và client
+  trả delta; MOON giữ model round trước trong `Context.state`; server raise khi
+  thiếu trạng thái thuật toán, nên `scaffold`/`moon` không thể âm thầm chạy như
+  FedAvg nữa (D-030).
+- **A (06/08)** — quantity skew và feature skew, sáu profile trên dữ liệu thật,
+  audit `passed` cả sáu, D-024 kiểm lại trên đĩa.
+- **H (07/08)** — launcher chạy đủ 5 thuật toán × 6 profile; metadata phân hoạch
+  đọc từ `profile.json` chứ không suy từ tên thư mục; `fedbn` thực thi tại client
+  (D-031, D-032).
+- **K (07/08)** — manifest dùng path tương đối theo dataset root cấp lúc chạy;
+  `resolve_image_path` raise thay vì resolve theo CWD; sinh protocol lock cho cả
+  15 scenario và từ chối ghi đè (D-033, D-034, D-035).
+- **C (07/08)** — fairness giữa client là std/spread chứ không chỉ sàn;
+  `gap_vs_centralized` là cột dẫn xuất, dấu dương nghĩa là FL còn kém hơn; baseline
+  ghép theo `(seed, model)` và từ chối artifact pilot (D-036).
+
+Hai tuyên bố ở mục C được kiểm bằng mutation chứ không chỉ bằng test đạt: đảo dấu
+gap làm fail 4 test ở cả ba lớp (metric, export, API), đổi `pstdev` thành `stdev`
+làm fail 5.
+
+Ghi chú môi trường: `tests/api` cần `fastapi`. Trước 07/08 gói này chưa có trong
+venv lõi nên `tests/api` không collect được, và mọi con số trong `docs/` giai đoạn
+đó (`91`, `130`, `164`) đều là suite **trừ** `tests/api`. Sau
+`pip install -e ".[api,dev]"` thì cả suite chạy được, nên 230 là số đầu tiên bao
+gồm toàn bộ.
 
 ## 2. Syntax/import-independent compilation
 

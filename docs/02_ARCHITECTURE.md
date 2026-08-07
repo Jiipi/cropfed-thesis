@@ -97,8 +97,10 @@ Global test trên server là lựa chọn phục vụ nghiên cứu mô phỏng.
 | Method | Path | Mục đích |
 |---|---|---|
 | GET | `/health` | healthcheck |
+| GET | `/health/ready` | readiness (database) |
+| GET | `/api/v1/auth/me` | vai trò của token đang dùng |
 | GET | `/api/v1/project` | tên đề tài, phạm vi đã khóa |
-| GET | `/api/v1/classes` | taxonomy 10 lớp |
+| GET | `/api/v1/classes` | taxonomy đang cấu hình (38 lớp mặc định, `CROPFED_TAXONOMY_SCOPE`) |
 | GET | `/api/v1/data-profiles` | count/phân bố lớp theo client; không trả ảnh hoặc local path |
 | POST | `/api/v1/experiments` | lưu config |
 | GET | `/api/v1/experiments` | danh sách run |
@@ -106,6 +108,16 @@ Global test trên server là lựa chọn phục vụ nghiên cứu mô phỏng.
 | POST | `/api/v1/experiments/{id}/start` | chạy synthetic smoke hoặc xếp hàng Flower |
 | GET | `/api/v1/experiments/{id}/rounds` | metric synthetic/Flower theo round |
 | GET | `/api/v1/experiments/{id}/clients` | metric và communication payload theo từng client/phase |
+| GET | `/api/v1/experiments/compare` | so sánh nhiều run: metric cuối, fairness (std/spread giữa client) và khoảng cách vs centralized |
+| GET | `/api/v1/experiments/export-csv` | xuất bảng so sánh dạng CSV |
+| GET | `/api/v1/clients` | danh sách cơ sở |
+| GET | `/api/v1/clients/{id}/status` | trạng thái một cơ sở |
+| GET | `/api/v1/checkpoints` | checkpoint đã triển khai |
+| POST | `/api/v1/predict` | phân loại một ảnh |
+
+Endpoint `compare` lấy mốc centralized từ `CROPFED_CENTRALIZED_BASELINE_RESULT` —
+đường dẫn phía server như mọi đường dẫn khác (D-019), HTTP không cấp được. Thiếu mốc
+thì cột gap trả `null`, không phải `0.0` (D-036).
 
 Với `execution_mode=synthetic-smoke`, FastAPI dùng background task nhẹ. Với
 `execution_mode=flower`, endpoint chỉ chuyển trạng thái sang `queued`; tiến trình

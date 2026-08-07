@@ -33,15 +33,18 @@
 
 ## Chương 4 — Dữ liệu và phương pháp thực nghiệm
 
-- PlantVillage và 10 lớp cà chua.
+- PlantVillage 38 lớp trên 14 loại cây (mốc 0.1.0 dùng 10 lớp cà chua — ghi rõ vì
+  checkpoint và artifact giai đoạn đó thuộc taxonomy khác).
 - Scan/manifest/data quality.
 - Split 64/16/20 và chống leakage.
 - Mô phỏng 4 client.
-- IID/Dirichlet alpha 0.5/0.1.
+- Sáu profile: IID, Dirichlet alpha 100/0.5/0.1, quantity skew, feature skew — tất cả
+  dùng chung một global test set.
 - MobileNetV2 và hyperparameter.
-- Centralized/local/FedAvg/FedProx.
+- Centralized/local/FedAvg/FedProx/FedBN/SCAFFOLD/MOON.
 - Protocol, seed, hardware, artifact.
-- Metric phân loại và hệ thống.
+- Metric phân loại và hệ thống; fairness giữa client (std/spread, không chỉ sàn) và
+  khoảng cách vs centralized với quy ước dấu ghi rõ.
 
 ## Chương 5 — Cài đặt
 

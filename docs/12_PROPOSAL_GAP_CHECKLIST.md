@@ -401,18 +401,42 @@ khớp "khoảng 54.000 ảnh, 38 lớp".
 
 ---
 
-## G. Đồng bộ tài liệu — P1
+## G. Đồng bộ tài liệu — ĐÃ SỬA 07/08/2026
 
-Docs mới cập nhật đến 31/07, chưa phản ánh việc chuyển sang 38 lớp hôm nay:
+Docs dừng ở 31/07 trong khi phạm vi đã đổi hai lần. Nguy hiểm không phải ở chỗ
+thiếu chữ mà ở chỗ **sai**: một phiên làm việc mới đọc `00_PROJECT_CONTEXT` sẽ
+tưởng đề tài là 10 lớp cà chua, 3 profile và 4 thuật toán — rồi sửa code cho khớp
+với tài liệu.
 
-- [ ] G1. `ROADMAP`/`00_PROJECT_CONTEXT` vẫn nói phạm vi 10 lớp cà chua; chưa có
-      entry nào cho 38 lớp, `alpha-100`, hay hai module `privacy`/`quantization`.
-- [ ] G2. `10_TEST_REPORT` ghi "60 test"; thực tế **76 test đạt** (06/08, không
-      tính `tests/api` vì `fastapi` chưa cài trong venv hiện tại).
-- [ ] G3. `DECISION_LOG` cần entry mới cho: chuyển taxonomy 38 lớp (thay D-003),
-      thêm `alpha-100` theo §6, và mở rộng thuật toán vượt D-007.
-- [ ] G4. `data/flower-profiles-full.partial-20260806/` chỉ có `iid` rỗng — tàn dư
-      lần chạy prep bị hỏng. Xác nhận rồi xóa.
+- [x] G1. `00_PROJECT_CONTEXT` §2/§6/§7/§8 đổi sang 38 lớp / 6 profile / 5 thuật
+      toán; thêm §12.1 liệt kê mọi thứ vào sau mốc 0.1.0. `ROADMAP` có khối trạng
+      thái đầu file, nói rõ câu "không mở rộng thuật toán" ở §1 đã bị D-030 thay.
+      Hai module `privacy`/`quantization` được ghi ở **§9 (nâng cao)**, không phải
+      §12 (đã có) — có file không đồng nghĩa với có năng lực.
+- [x] G2. `10_TEST_REPORT` giữ con số 60 làm mốc lịch sử và thêm khối cập nhật:
+      **230 test đạt / 128 subtest** (73 unit, 60 flower, 55 api, 42 system), cùng
+      mục "Phạm vi bổ sung sau mốc 0.1.0" dẫn về A/B/C/H/K.
+- [x] G3. `DECISION_LOG` thêm D-037 (taxonomy 38 lớp, đánh D-003 thành
+      **Superseded** thay vì xóa) và D-038 (`alpha-100` + hai skew mới). Mở rộng
+      thuật toán đã có ở D-030 từ 06/08, không cần entry trùng.
+- [x] G4. Đã xóa `data/flower-profiles-full.partial-20260806/` sau khi đối chiếu —
+      xem dưới.
+
+### G4: thư mục partial **không** rỗng như bản kiểm kê ghi
+
+Nó có 13 file, 28 MB, và là bản `iid` hoàn chỉnh. Nếu tin bản kiểm kê mà xóa thẳng
+thì vẫn đúng kết quả nhưng sai lý do — nên đã đối chiếu trước, ghi ở
+`artifacts/partial_profile_removal_check.json`:
+
+- 97.752 dòng manifest (train/test/validation/pooled) khớp **từng dòng** với
+  profile hiện hành sau khi cắt bỏ tiền tố máy: 0 dòng lệch;
+- cả 8 file client (4 client × train/val) trùng đúng danh sách `image_id`;
+- `partition_summary.json` giống hệt.
+
+Khác biệt duy nhất: 97.752 đường dẫn đều là **tuyệt đối** (`F:\project\...`, tức
+tiền D-034), và thư mục thiếu `profile.json` + `data_audit.json`. Đây là bản chụp
+giữa chừng trước khi migrate, đã bị bản hiện hành thay thế hoàn toàn. `.gitignore:24`
+vốn đã loại nó khỏi git, và không file nguồn/tài liệu nào tham chiếu tới nó.
 
 ---
 
@@ -489,7 +513,8 @@ sẽ khiến run fail *sau khi* đã đốt hết thời gian GPU:
    trên đúng một cái laptop.
 5. ~~**C1–C4**~~ — **XONG 07/08/2026.** Fairness là độ lệch chứ không còn là sàn;
    gap-vs-centralized thành cột thay vì phép trừ bằng mắt.
-6. **G1–G4** — đồng bộ docs trước khi khóa protocol.
+6. ~~**G1–G4**~~ — **XONG 07/08/2026.** Docs khớp lại với code trước khi khóa
+   protocol. Tài liệu lệch không chỉ thiếu thông tin, nó chỉ sai đường.
 7. **D, E, F** — GĐ4 trở đi, sau khi trục so sánh chính đã vững.
 
 ## Nguyên tắc giữ nguyên

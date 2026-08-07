@@ -35,6 +35,30 @@ Trạng thái:
 | Flower TLS/node auth | Planned | security doc, generated local credential material | key/CA generation unit test, chưa nối runtime; worker profile chạy với PostgreSQL đã được kiểm chứng | cấu hình và kiểm thử SuperLink/SuperNode nhiều máy với TLS bật |
 | Secure aggregation/DP | Advanced | security doc | — | chỉ sau MVP |
 
+## Bổ sung sau mốc 0.1.0 (06–07/08/2026)
+
+Bảng trên là ảnh chụp bản bàn giao `0.1.0`, giữ nguyên. Các năng lực vào sau:
+
+| Yêu cầu | Trạng thái | Code/tài liệu | Kiểm chứng hiện tại | Việc còn lại |
+|---|---|---|---|---|
+| Taxonomy 38 lớp (D-037) | Done | `constants.py: PLANTVILLAGE_FULL_TAXONOMY`, CLI `prepare-full-profiles` | 54.305 ảnh scan thật; 43.447 development pool / 10.858 global test, trong pool có 34.757 local train + 8.690 local validation, seed 2026; audit `passed`; `taxonomy_from_class_order` phân biệt được checkpoint 10 lớp cũ | chạy main study trên taxonomy này |
+| Quantity/feature skew (D-038) | Done | `data/partitioning.py`, `data/profiles.py: FULL_PROFILE_SPECS`, CLI `extend-full-profiles` | 6 profile, audit `passed` cả 6; quantity skew lệch 16× (2.041→33.042); feature skew giữ đủ 38 lớp mỗi client | đo hiệu ứng trong main study |
+| D-024 trên 6 profile | Done | `data/profiles.py: extend_data_profiles` | băm SHA-256 sáu `test_manifest.csv` cho **một** giá trị duy nhất, kiểm trên đĩa; 4 test từ chối (ghi đè, sai seed, manifest bị sửa) | giữ bất biến khi thêm profile |
+| FedBN/SCAFFOLD/MOON (D-030, D-031) | Done | `flower/client_app.py`, `flower/server_app.py`, `fl/aggregation.py` | server raise nếu thiếu trạng thái thuật toán; `TrackedFedBN` raise từ round 2 nếu client không giữ BN riêng; bằng chứng kiểm ở tầng artifact chứ không chỉ ở log | chạy main study, so trên cùng profile α=0.1 |
+| Launcher main study (D-032) | Done | `scripts/run_main_study.py` | 15 scenario × 5 thuật toán × 6 profile; metadata phân hoạch đọc từ `profile.json`, không suy từ tên thư mục | chạy trên máy GPU |
+| Artifact portable (D-033–D-035) | Done | `data/paths.py`, `scripts/migrate_manifest_paths.py`, `scripts/generate_protocol_locks.py` | 847.194 dòng migrate, 0 lệch theo bất biến `image_id == sha1(relative_path)[:16]`; audit sau migrate `images=54305, errors=0`; lock sinh đủ 15 scenario và từ chối ghi đè | chạy thật trên máy GPU |
+| Fairness giữa client (D-036) | Done | `ml/metrics.py: client_fairness`, `experiments/export.py`, `api/main.py`, `frontend/src/App.jsx` | 27 test; trung bình không trọng số và `pstdev` được khóa bằng mutation test (đổi sang `stdev` làm fail 5 test) | điền số thật từ main study |
+| Gap vs centralized (D-036) | Done | `ml/metrics.py: gap_vs_centralized`, exporter, `/experiments/compare` | dấu `centralized − federated` khóa bằng mutation test (đảo dấu làm fail 4 test ở cả ba lớp); từ chối baseline khác model, khác seed, hoặc `research_result_valid=false` | chạy centralized baseline nghiên cứu để có mốc thật |
+
+Cập nhật số kiểm thử: **230 test đạt / 128 subtest** (`pytest tests`, 31,58s) — 73
+`tests/unit`, 60 `tests/flower`, 55 `tests/api`, 42 `tests/system`. Đây là lần đầu
+`tests/api` chạy được; trước 07/08 venv lõi thiếu `fastapi` nên mọi con số cũ trong
+`docs/` (60, 91, 130, 164) đều là suite **trừ** `tests/api`.
+
+Khoảng cách còn lại so với đề cương:
+[`12_PROPOSAL_GAP_CHECKLIST.md`](12_PROPOSAL_GAP_CHECKLIST.md) — mục D (backbone nhẹ
+và lượng tử hóa), E (differential privacy), F (dữ liệu bổ sung).
+
 ## Kiểm thử đã chạy ở bản bàn giao
 
 ```text

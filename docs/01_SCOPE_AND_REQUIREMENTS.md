@@ -82,7 +82,7 @@ Không xây vai trò “bác sĩ cây trồng tự động”. Kết quả chỉ
 
 ### UC-01 — Chuẩn bị dữ liệu
 
-Người nghiên cứu chỉ định thư mục PlantVillage → hệ thống kiểm tra 10 lớp → tách global test → phân phần train thành bốn client → tạo manifest và thống kê nhãn.
+Người nghiên cứu chỉ định thư mục PlantVillage → hệ thống kiểm tra đủ taxonomy (38 lớp; 10 lớp ở mốc 0.1.0) → tách global test → phân phần train thành bốn client → tạo manifest và thống kê nhãn.
 
 ### UC-02 — Chạy FL
 
