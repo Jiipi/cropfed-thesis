@@ -7,6 +7,7 @@ from pathlib import Path
 from PIL import Image
 
 from cropfed.data.manifest import read_manifest
+from cropfed.data.paths import resolve_dataset_root, resolve_image_path
 
 
 def build_transforms(*, training: bool):
@@ -44,12 +45,27 @@ class ManifestImageDataset:
 
     The object implements the Dataset protocol and therefore works with
     ``torch.utils.data.DataLoader`` without importing torch at module load time.
+
+    ``dataset_root`` is where the manifest's relative image paths are anchored.
+    It is resolved once here rather than per image so that a missing root fails
+    on construction instead of thousands of times inside the training loop.
     """
 
-    def __init__(self, manifest_path: Path, *, training: bool) -> None:
+    def __init__(
+        self,
+        manifest_path: Path,
+        *,
+        training: bool,
+        dataset_root: Path | str | None = None,
+    ) -> None:
         self.records = read_manifest(manifest_path)
         if not self.records:
             raise ValueError(f"manifest is empty: {manifest_path}")
+        self.dataset_root = resolve_dataset_root(dataset_root)
+        # Resolving the first record here turns "no dataset root" into one clear
+        # error at build time; leaving it to __getitem__ would surface the same
+        # problem as a worker-process traceback after the run has started.
+        resolve_image_path(self.records[0].path, self.dataset_root)
         self.transform = build_transforms(training=training)
 
     def __len__(self) -> int:
@@ -57,7 +73,7 @@ class ManifestImageDataset:
 
     def __getitem__(self, index: int):
         record = self.records[index]
-        with Image.open(record.path) as source:
+        with Image.open(resolve_image_path(record.path, self.dataset_root)) as source:
             image = source.convert("RGB")
         return self.transform(image), record.label_id
 
@@ -68,11 +84,14 @@ def build_dataloader(
     training: bool,
     batch_size: int,
     num_workers: int = 0,
+    dataset_root: Path | str | None = None,
 ):
     import torch
     from torch.utils.data import DataLoader
 
-    dataset = ManifestImageDataset(manifest_path, training=training)
+    dataset = ManifestImageDataset(
+        manifest_path, training=training, dataset_root=dataset_root
+    )
     return DataLoader(
         dataset,
         batch_size=batch_size,

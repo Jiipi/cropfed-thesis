@@ -120,16 +120,23 @@ def prepare_data_profiles(
     ``output_root`` must be empty so a prior experimental partition cannot be
     overwritten accidentally.  Every profile receives byte-identical master
     manifests and a different ``clients`` directory.
+
+    ``dataset_root`` serves two purposes: it is scanned for images, and it is
+    the anchor the manifests' relative paths are written against.  The profile
+    set that comes out therefore describes the same experiment on any machine
+    that holds the same dataset, wherever it is mounted.
     """
 
     output_root = _prepare_empty_output_root(output_root)
-    records = scan_plantvillage(dataset_root, taxonomy)
+    resolved_dataset_root = dataset_root.expanduser().resolve()
+    records = scan_plantvillage(resolved_dataset_root, taxonomy)
     train_records, test_records, split_statistics = (
         content_grouped_stratified_train_test_split(
             records,
             test_fraction=test_fraction,
             seed=seed,
             num_classes=len(taxonomy.class_names),
+            dataset_root=resolved_dataset_root,
         )
     )
 
@@ -148,6 +155,7 @@ def prepare_data_profiles(
                 validation_fraction=validation_fraction,
                 num_clients=num_clients,
                 seed=seed,
+                dataset_root=resolved_dataset_root,
             )
         )
 
@@ -187,6 +195,7 @@ def extend_data_profiles(
     output_root: Path,
     taxonomy: DatasetTaxonomy,
     profile_specs: tuple[DataProfileSpec, ...],
+    dataset_root: Path,
     source_profile: str = "iid",
     validation_fraction: float = 0.2,
     num_clients: int = 4,
@@ -203,11 +212,24 @@ def extend_data_profiles(
     records across clients, so D-024 — every profile shares one global test set
     — holds by construction rather than by convention.
 
+    ``dataset_root`` is not scanned; it only anchors the manifest paths that are
+    already recorded, so that partitioning can group images by content hash and
+    the audit can open them.  It is required rather than optional: without it
+    every image resolves to nothing, the audit reports each one as invalid, and
+    the extension fails in a way that looks like corrupt data instead of a
+    missing argument.
+
     Existing profile directories are never touched; a name that already exists
     is rejected instead of overwritten.
     """
 
     resolved_root = output_root.expanduser().resolve()
+    resolved_dataset_root = dataset_root.expanduser().resolve()
+    if not resolved_dataset_root.is_dir():
+        raise NotADirectoryError(
+            f"dataset root does not exist: {resolved_dataset_root}; the profiles "
+            "store image paths relative to it and the audit could open none of them"
+        )
     index_path = resolved_root / "profiles_index.json"
     if not index_path.is_file():
         raise FileNotFoundError(
@@ -269,6 +291,7 @@ def extend_data_profiles(
             validation_fraction=validation_fraction,
             num_clients=num_clients,
             seed=seed,
+            dataset_root=resolved_dataset_root,
         )
         for spec in profile_specs
     ]
@@ -313,6 +336,7 @@ def _build_profile(
     validation_fraction: float,
     num_clients: int,
     seed: int,
+    dataset_root: Path | None = None,
 ) -> dict[str, Any]:
     """Write one profile directory and return its index row."""
 
@@ -344,6 +368,7 @@ def _build_profile(
         seed=seed,
         pooled_output_dir=profile_root,
         num_classes=len(taxonomy.class_names),
+        dataset_root=dataset_root,
     )
 
     audit = audit_prepared_data(
@@ -352,6 +377,7 @@ def _build_profile(
         client_data_root=client_root,
         num_clients=num_clients,
         class_names=taxonomy.class_names,
+        dataset_root=dataset_root,
     )
     audit_path = profile_root / "data_audit.json"
     write_audit_report(audit, audit_path)

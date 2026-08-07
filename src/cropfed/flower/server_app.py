@@ -71,6 +71,23 @@ def _build_strategy(context: Context):
     )
 
 
+def _dataset_root(context: Context) -> Path:
+    """Return the anchor for this run's relative image paths.
+
+    Missing is an error, not a default: resolving relative manifest paths against
+    the launch directory would tie the run to where it was started from, and the
+    failure would surface as a missing image rather than a missing setting.
+    """
+
+    value = str(context.run_config.get("dataset-root", "")).strip()
+    if not value:
+        raise KeyError(
+            "run_config is missing 'dataset-root'; set it in "
+            "[tool.flwr.app.config] or pass it from the run launcher"
+        )
+    return Path(value).expanduser().resolve()
+
+
 def _algorithm_hyperparameters(context: Context) -> dict[str, float]:
     """Return every algorithm hyperparameter, zero when not applicable.
 
@@ -112,6 +129,7 @@ def main(grid: Grid, context: Context) -> None:
             "[tool.flwr.app.config] or pass it from the run launcher"
         )
     taxonomy = taxonomy_from_scope(str(scope))
+    dataset_root = _dataset_root(context)
     save_model = bool(context.run_config["save-model"])
     configured_result_kind = str(
         context.run_config.get("result-kind", "federated_image_unclassified")
@@ -303,6 +321,11 @@ def main(grid: Grid, context: Context) -> None:
                     "local_epochs": int(context.run_config["local-epochs"]),
                     "batch_size": int(context.run_config["batch-size"]),
                     "learning_rate": float(context.run_config["learning-rate"]),
+                    "num_workers": int(context.run_config.get("num-workers", 0)),
+                    # The root itself is a local path and stays out of the
+                    # artifact (D-025); recording that one was resolved is what
+                    # distinguishes a portable run from a machine-bound one.
+                    "dataset_root_resolved": dataset_root.is_dir(),
                     "seed": seed,
                     "pretrained": bool(context.run_config["pretrained"]),
                     **_algorithm_hyperparameters(context),
@@ -435,6 +458,8 @@ def _evaluate_manifest(
         manifest_path,
         training=False,
         batch_size=int(context.run_config["batch-size"]),
+        num_workers=int(context.run_config.get("num-workers", 0)),
+        dataset_root=_dataset_root(context),
     )
     return evaluate_model(
         model,

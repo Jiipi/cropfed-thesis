@@ -43,6 +43,9 @@ def run_smoke(
         flower_worker_enabled=True,
         flower_project_dir=PROJECT_ROOT,
         flower_data_root=output_root / "profiles",
+        # The fixture's manifests are relative to its own root, which is the
+        # profile directory here; a real deployment points this at data/raw.
+        flower_dataset_root=profile_root,
         flower_output_root=output_root / "runs",
         flower_home=flwr_home.resolve(),
         flower_superlink="local",

@@ -215,6 +215,8 @@ def _run_centralized(
     taxonomy: DatasetTaxonomy,
     research_result_valid: bool,
     protocol_lock: Path | None,
+    dataset_root: Path,
+    num_workers: int,
 ) -> dict[str, object]:
     pooled_manifest = profile_dir / "pooled_train_manifest.csv"
     validation_manifest = profile_dir / "validation_manifest.csv"
@@ -238,6 +240,8 @@ def _run_centralized(
         protocol_lock=protocol_lock,
         class_names=taxonomy.class_names,
         class_groups=taxonomy.class_groups,
+        dataset_root=dataset_root,
+        num_workers=num_workers,
     )
 
 
@@ -253,6 +257,8 @@ def _run_local_only(
     taxonomy: DatasetTaxonomy,
     research_result_valid: bool,
     protocol_lock: Path | None,
+    dataset_root: Path,
+    num_workers: int,
 ) -> dict[str, object]:
     metadata = _read_profile_metadata(profile_dir)
     return run_local_only(
@@ -272,6 +278,8 @@ def _run_local_only(
         protocol_lock=protocol_lock,
         class_names=taxonomy.class_names,
         class_groups=taxonomy.class_groups,
+        dataset_root=dataset_root,
+        num_workers=num_workers,
     )
 
 
@@ -296,6 +304,8 @@ def _run_federated(
     taxonomy: DatasetTaxonomy,
     research_result_valid: bool,
     protocol_lock: Path | None,
+    dataset_root: Path,
+    num_workers: int,
 ) -> dict[str, object]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(f"refusing to overwrite non-empty run: {output_dir}")
@@ -336,6 +346,8 @@ def _run_federated(
         "pretrained": pretrained,
         "client-data-root": (profile_dir / "clients").as_posix(),
         "global-test-manifest": (profile_dir / "test_manifest.csv").as_posix(),
+        "dataset-root": dataset_root.as_posix(),
+        "num-workers": num_workers,
         "save-model": True,
         "output-dir": output_dir.as_posix(),
         "result-kind": "federated_image_main_study",
@@ -414,6 +426,8 @@ def run_scenario(
     research_result_valid: bool,
     protocol_lock_root: Path | None,
     proximal_mu: float,
+    dataset_root: Path,
+    num_workers: int = 0,
     scaffold_server_lr: float = DEFAULT_SCAFFOLD_SERVER_LR,
     moon_temperature: float = DEFAULT_MOON_TEMPERATURE,
     moon_mu: float = DEFAULT_MOON_MU,
@@ -439,6 +453,8 @@ def run_scenario(
             taxonomy=taxonomy,
             research_result_valid=research_result_valid,
             protocol_lock=protocol_lock,
+            dataset_root=dataset_root,
+            num_workers=num_workers,
         )
     elif scenario["mode"] == "local-only":
         result = _run_local_only(
@@ -452,6 +468,8 @@ def run_scenario(
             taxonomy=taxonomy,
             research_result_valid=research_result_valid,
             protocol_lock=protocol_lock,
+            dataset_root=dataset_root,
+            num_workers=num_workers,
         )
     elif scenario["mode"] == "federated":
         result = _run_federated(
@@ -474,6 +492,8 @@ def run_scenario(
             taxonomy=taxonomy,
             research_result_valid=research_result_valid,
             protocol_lock=protocol_lock,
+            dataset_root=dataset_root,
+            num_workers=num_workers,
         )
     else:
         raise ValueError(f"unknown mode: {scenario['mode']}")
@@ -506,6 +526,24 @@ def main() -> int:
         "--profiles-root",
         type=Path,
         default=PROJECT_ROOT / "data" / "flower-profiles-full",
+    )
+    parser.add_argument(
+        "--dataset-root",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "raw",
+        help=(
+            "where the profiles' relative image paths are anchored; on a rented "
+            "GPU machine this is the only path that changes"
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help=(
+            "dataloader worker processes per client; 0 decodes JPEGs in the "
+            "training process and will starve a GPU"
+        ),
     )
     parser.add_argument(
         "--taxonomy",
@@ -564,9 +602,17 @@ def main() -> int:
         parser.error("--moon-temperature must be positive")
     if args.moon_mu < 0:
         parser.error("--moon-mu cannot be negative")
+    if args.num_workers < 0:
+        parser.error("--num-workers cannot be negative")
 
     taxonomy = taxonomy_from_scope(args.taxonomy)
     profiles_root = args.profiles_root.expanduser().resolve()
+    dataset_root = args.dataset_root.expanduser().resolve()
+    if not dataset_root.is_dir():
+        parser.error(
+            f"--dataset-root does not exist: {dataset_root}; the profiles store "
+            "image paths relative to it and every client would fail to open a file"
+        )
     protocol_lock_root = (
         args.protocol_lock_root.expanduser().resolve()
         if args.protocol_lock_root is not None
@@ -607,6 +653,8 @@ def main() -> int:
                 research_result_valid=args.research_run,
                 protocol_lock_root=protocol_lock_root,
                 proximal_mu=args.proximal_mu,
+                dataset_root=dataset_root,
+                num_workers=args.num_workers,
                 scaffold_server_lr=args.scaffold_server_lr,
                 moon_temperature=args.moon_temperature,
                 moon_mu=args.moon_mu,
@@ -654,6 +702,7 @@ def main() -> int:
             "moon_mu": args.moon_mu,
             "model": args.model,
             "profiles_root": str(profiles_root),
+            "num_workers": args.num_workers,
             "num_cpus": args.num_cpus,
             "num_gpus": args.num_gpus,
         },

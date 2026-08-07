@@ -17,6 +17,10 @@ class Settings:
     flower_worker_enabled: bool = False
     flower_project_dir: Path = Path(".")
     flower_data_root: Path = Path("data/flower-profiles-full")
+    #: Where the profiles' relative image paths are anchored. Server-owned, like
+    #: every other data path: HTTP clients never supply it (D-019).
+    flower_dataset_root: Path = Path("data/raw")
+    flower_num_workers: int = 0
     taxonomy_scope: str = "plantvillage-full"
     flower_model_name: str = "mobilenet_v3_small"
     flower_num_gpus: float = 0.0
@@ -114,6 +118,12 @@ def load_settings() -> Settings:
         flower_data_root=Path(
             os.getenv("CROPFED_FLOWER_DATA_ROOT", "data/flower-profiles-full")
         ),
+        flower_dataset_root=Path(
+            os.getenv("CROPFED_FLOWER_DATASET_ROOT", "data/raw")
+        ),
+        flower_num_workers=_environment_nonnegative_int(
+            "CROPFED_FLOWER_NUM_WORKERS", default=0
+        ),
         taxonomy_scope=os.getenv(
             "CROPFED_TAXONOMY_SCOPE", "plantvillage-full"
         ),
@@ -164,6 +174,19 @@ def _environment_int(name: str, *, default: int) -> int:
     value = int(os.getenv(name, str(default)))
     if value < 1:
         raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _environment_nonnegative_int(name: str, *, default: int) -> int:
+    """Zero is a meaningful value here, unlike for counts of CPUs or seconds.
+
+    ``num_workers=0`` means "decode in the training process", which is the right
+    default on Windows and inside a single-CPU Ray actor.
+    """
+
+    value = int(os.getenv(name, str(default)))
+    if value < 0:
+        raise ValueError(f"{name} cannot be negative")
     return value
 
 

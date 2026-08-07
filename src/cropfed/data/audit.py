@@ -17,6 +17,7 @@ from typing import Any
 from PIL import Image
 
 from cropfed.data.manifest import IMAGE_EXTENSIONS, ImageRecord, read_manifest
+from cropfed.data.paths import resolve_dataset_root, resolve_image_path
 
 
 def audit_prepared_data(
@@ -26,6 +27,7 @@ def audit_prepared_data(
     client_data_root: Path | None = None,
     num_clients: int = 4,
     class_names: Sequence[str],
+    dataset_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """Audit image integrity, taxonomy, split isolation, and client assignment.
 
@@ -33,6 +35,10 @@ def audit_prepared_data(
     normally appears in both the master training manifest and one client
     manifest. Cross-split content overlap is an error; exact duplicates wholly
     within train or test are reported as warnings for an explicit data decision.
+
+    ``dataset_root`` anchors the manifests' relative image paths. Every manifest
+    in one audit is anchored the same way, so the resolved path stays usable as
+    the identity key that cross-split overlap detection depends on.
     """
 
     if num_clients < 2:
@@ -42,6 +48,7 @@ def audit_prepared_data(
         resolved_class_names
     ):
         raise ValueError("class_names must contain at least two unique names")
+    resolved_root = resolve_dataset_root(dataset_root)
 
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -114,7 +121,9 @@ def audit_prepared_data(
                 count=len(duplicate_ids),
                 image_ids=duplicate_ids,
             )
-        duplicate_paths = _duplicates(_path_key(record.path) for record in records)
+        duplicate_paths = _duplicates(
+            _path_key(record.path, resolved_root) for record in records
+        )
         if duplicate_paths:
             _add_issue(
                 errors,
@@ -156,7 +165,7 @@ def audit_prepared_data(
     path_references: dict[str, set[str]] = defaultdict(set)
     for records in records_by_scope.values():
         for record in records:
-            path_references[_path_key(record.path)].add(record.image_id)
+            path_references[_path_key(record.path, resolved_root)].add(record.image_id)
 
     image_inspections: dict[str, dict[str, Any]] = {}
     invalid_images: list[dict[str, Any]] = []
@@ -187,10 +196,10 @@ def audit_prepared_data(
     test_records = records_by_scope.get("global_test", [])
     train_ids = {record.image_id for record in train_records}
     test_ids = {record.image_id for record in test_records}
-    train_paths = {_path_key(record.path) for record in train_records}
-    test_paths = {_path_key(record.path) for record in test_records}
-    train_hashes = _content_hashes(train_records, image_inspections)
-    test_hashes = _content_hashes(test_records, image_inspections)
+    train_paths = {_path_key(record.path, resolved_root) for record in train_records}
+    test_paths = {_path_key(record.path, resolved_root) for record in test_records}
+    train_hashes = _content_hashes(train_records, image_inspections, resolved_root)
+    test_hashes = _content_hashes(test_records, image_inspections, resolved_root)
 
     id_overlap = sorted(train_ids & test_ids)
     path_overlap_count = len(train_paths & test_paths)
@@ -220,6 +229,7 @@ def audit_prepared_data(
         train_records,
         test_records,
         image_inspections,
+        resolved_root,
     )
     within_train = [group for group in duplicate_groups if group["splits"] == ["train"]]
     within_test = [group for group in duplicate_groups if group["splits"] == ["test"]]
@@ -245,6 +255,7 @@ def audit_prepared_data(
         num_clients=num_clients,
         enabled=client_data_root is not None,
         errors=errors,
+        dataset_root=resolved_root,
     )
 
     return {
@@ -305,6 +316,7 @@ def _audit_client_assignment(
     num_clients: int,
     enabled: bool,
     errors: list[dict[str, Any]],
+    dataset_root: Path | None = None,
 ) -> dict[str, Any]:
     if not enabled:
         return {"checked": False}
@@ -353,9 +365,11 @@ def _audit_client_assignment(
             image_ids=sorted(repeated_assignments),
         )
 
-    train_content_hashes = _content_hashes(client_train_records, image_inspections)
+    train_content_hashes = _content_hashes(
+        client_train_records, image_inspections, dataset_root
+    )
     validation_content_hashes = _content_hashes(
-        client_validation_records, image_inspections
+        client_validation_records, image_inspections, dataset_root
     )
     train_validation_content_overlap = sorted(
         train_content_hashes & validation_content_hashes
@@ -370,7 +384,7 @@ def _audit_client_assignment(
 
     scopes_by_content: dict[str, set[str]] = defaultdict(set)
     for scope, record in client_records:
-        inspection = image_inspections.get(_path_key(record.path))
+        inspection = image_inspections.get(_path_key(record.path, dataset_root))
         if inspection is not None:
             scopes_by_content[str(inspection["sha256"])].add(scope)
     multi_scope_content = {
@@ -414,7 +428,8 @@ def _audit_client_assignment(
         if (
             record.label_id != source.label_id
             or record.label_name != source.label_name
-            or _path_key(record.path) != _path_key(source.path)
+            or _path_key(record.path, dataset_root)
+            != _path_key(source.path, dataset_root)
         ):
             metadata_mismatches.add(record.image_id)
     if metadata_mismatches:
@@ -429,6 +444,7 @@ def _audit_client_assignment(
     client_hashes = _content_hashes(
         [record for _, record in client_records],
         image_inspections,
+        dataset_root,
     )
     client_test_content_overlap = sorted(client_hashes & test_hashes)
     if client_test_id_overlap:
@@ -501,11 +517,12 @@ def _duplicate_content_groups(
     train_records: list[ImageRecord],
     test_records: list[ImageRecord],
     inspections: dict[str, dict[str, Any]],
+    dataset_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     by_hash: dict[str, set[tuple[str, str]]] = defaultdict(set)
     for split, records in (("train", train_records), ("test", test_records)):
         for record in records:
-            inspection = inspections.get(_path_key(record.path))
+            inspection = inspections.get(_path_key(record.path, dataset_root))
             if inspection is not None:
                 by_hash[str(inspection["sha256"])].add((split, record.image_id))
     groups: list[dict[str, Any]] = []
@@ -523,12 +540,14 @@ def _duplicate_content_groups(
 
 
 def _content_hashes(
-    records: list[ImageRecord], inspections: dict[str, dict[str, Any]]
+    records: list[ImageRecord],
+    inspections: dict[str, dict[str, Any]],
+    dataset_root: Path | None = None,
 ) -> set[str]:
     return {
-        str(inspections[_path_key(record.path)]["sha256"])
+        str(inspections[_path_key(record.path, dataset_root)]["sha256"])
         for record in records
-        if _path_key(record.path) in inspections
+        if _path_key(record.path, dataset_root) in inspections
     }
 
 
@@ -540,8 +559,23 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _path_key(value: str) -> str:
-    return str(Path(value).expanduser().resolve())
+def _path_key(value: str, dataset_root: Path | None = None) -> str:
+    """Return a stable identity for one image, whatever the manifest stored.
+
+    Two manifests may name the same file differently — one relative, one
+    absolute — so both are anchored and resolved before comparison. Overlap
+    detection compares these keys, and a key that varied with the spelling of
+    the path would report a clean split where samples are in fact shared.
+    """
+
+    try:
+        path = resolve_image_path(value, dataset_root)
+    except ValueError:
+        # No root for a relative path. Returning the raw value keeps the audit
+        # running on dependency-light fixtures that use virtual paths; a real
+        # run reaches the same error earlier, when the dataloader is built.
+        return value
+    return str(path.expanduser().resolve())
 
 
 def _duplicates(values) -> list[str]:

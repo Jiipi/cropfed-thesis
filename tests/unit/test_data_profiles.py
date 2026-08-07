@@ -229,6 +229,7 @@ class DataProfileTests(unittest.TestCase):
                 ),
                 num_clients=4,
                 seed=11,
+                dataset_root=dataset,
             )
 
             self.assertEqual(extended["status"], "passed")
@@ -276,6 +277,7 @@ class DataProfileTests(unittest.TestCase):
                     profile_specs=(DataProfileSpec("iid", "feature_skew", None),),
                     num_clients=4,
                     seed=11,
+                    dataset_root=dataset,
                 )
 
             self.assertEqual(
@@ -302,6 +304,7 @@ class DataProfileTests(unittest.TestCase):
                     profile_specs=(DataProfileSpec("feature-skew", "feature_skew", None),),
                     num_clients=4,
                     seed=99,
+                    dataset_root=dataset,
                 )
 
     def test_extension_detects_a_tampered_source_manifest(self) -> None:
@@ -326,6 +329,7 @@ class DataProfileTests(unittest.TestCase):
                     profile_specs=(DataProfileSpec("feature-skew", "feature_skew", None),),
                     num_clients=4,
                     seed=11,
+                    dataset_root=dataset,
                 )
 
     @staticmethod

@@ -158,3 +158,89 @@ Chỉ mở P2 khi tất cả điều sau đúng:
 - centralized/local/FedAvg/FedProx đều có;
 - dashboard và inference demo được;
 - báo cáo phương pháp đã có bản nháp.
+
+## 8. Chuyển sang máy GPU
+
+Bộ profile đã chuẩn bị mô tả **thí nghiệm**, không mô tả cái máy đã tạo ra nó (D-033, D-034). Sang máy mới chỉ có một thứ đổi: **dataset root**.
+
+### 8.1 Mang gì đi
+
+- source + `docs/` (git);
+- `data/flower-profiles-full/` (175,8 MB, **không** nằm trong git — copy tay hoặc rsync);
+- raw PlantVillage tải lại từ nguồn gốc, không bàn giao kèm (D-013).
+
+### 8.2 Kiểm tra bộ profile sau khi copy
+
+Chạy **trước** mọi thứ khác. Lệnh này đối chiếu SHA-256 đã ghi với bytes trên đĩa và mở thử từng dòng manifest:
+
+```bash
+python scripts/migrate_manifest_paths.py \
+    --profiles-root data/flower-profiles-full \
+    --dataset-root /data/PlantVillage-Dataset/raw/color \
+    --verify
+```
+
+Kỳ vọng: `status: "passed"`, `missing_files: 0`, `rows_checked: 847194`. Exit code 2 nghĩa là root sai hoặc file copy thiếu — dừng lại, đừng train.
+
+Nếu bộ profile còn ở dạng cũ (path tuyệt đối), migrate một lần rồi verify:
+
+```bash
+python scripts/migrate_manifest_paths.py --dataset-root <root> --dry-run
+python scripts/migrate_manifest_paths.py --dataset-root <root> --backup artifacts/profiles-backup
+```
+
+`--dry-run` báo `total_rewritten` mà không ghi gì. Bất kỳ dòng nào trượt kiểm tra `image_id` sẽ hủy toàn bộ trước khi ghi (D-034).
+
+### 8.3 Cấu hình đường dẫn
+
+Đặt một lần cho cả phiên thay vì truyền `--dataset-root` từng lệnh:
+
+```bash
+export CROPFED_DATASET_ROOT=/data/PlantVillage-Dataset/raw/color
+```
+
+Cờ `--dataset-root` tường minh luôn thắng biến môi trường. Thiếu cả hai thì chương trình **raise** chứ không resolve theo thư mục hiện hành (D-033).
+
+### 8.4 num_workers
+
+Mặc định là `0` vì đó là giá trị an toàn trên Windows — và đó cũng là giá trị sẽ **bỏ đói GPU**, vì ảnh được decode ngay trong process train. Trên máy Linux có GPU, đặt theo số core:
+
+```bash
+python scripts/run_main_study.py ... --num-workers 8
+```
+
+Giá trị đi từ `run_config` xuống `build_dataloader` cho cả nhánh Flower lẫn centralized/local-only.
+
+### 8.5 Thứ tự bắt buộc: lock trước, run sau
+
+Protocol lock phải tồn tại **trước** run mà nó ràng buộc; sinh lock từ kết quả một run đã xong không chứng minh gì (D-035).
+
+```bash
+python scripts/generate_protocol_locks.py \
+    --output-root artifacts/protocol-locks-seed2026 \
+    --profiles-root data/flower-profiles-full \
+    --allowed-seed 2026 --allowed-seed 2027 --allowed-seed 2028 \
+    --rounds 10 --local-epochs 1
+
+python scripts/run_main_study.py --research-run \
+    --protocol-lock-root artifacts/protocol-locks-seed2026 \
+    --profiles-root data/flower-profiles-full \
+    --num-workers 8
+```
+
+Lệnh sinh lock **từ chối ghi đè** một thư mục lock đã có. Muốn đổi hyperparameter thì sinh vào thư mục mới, đừng xóa thư mục cũ — lock cũ là bằng chứng cho các run đã chạy.
+
+Tham số hyperparameter truyền cho `generate_protocol_locks.py` phải **trùng** với tham số truyền cho `run_main_study.py`. Lệch một khóa thì run vẫn train hết rồi mới fail ở bước validate cuối.
+
+### 8.6 Kiểm tra nhanh trước khi chiếm GPU nhiều giờ
+
+```bash
+PYTHONIOENCODING=utf-8 python -m pytest tests -q
+python -m cropfed.cli audit-data \
+    --train-manifest data/flower-profiles-full/iid/train_manifest.csv \
+    --test-manifest data/flower-profiles-full/iid/test_manifest.csv \
+    --dataset-root $CROPFED_DATASET_ROOT \
+    --output artifacts/preflight_audit.json
+```
+
+Trạng thái tham chiếu trên máy laptop: 164 passed / 128 subtests; audit `images=54305, errors=0`. `tests/api` cần `fastapi` — thiếu gói này thì collection lỗi, không liên quan đến đường train.

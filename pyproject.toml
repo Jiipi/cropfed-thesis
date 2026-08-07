@@ -69,6 +69,13 @@ pretrained = true
 taxonomy-scope = "plantvillage-full"
 client-data-root = "./data/flower-profiles-full/iid/clients"
 global-test-manifest = "./data/flower-profiles-full/iid/test_manifest.csv"
+# Where the manifests' relative image paths are anchored. Declared here so that
+# `run_config["dataset-root"]` is a hard requirement rather than a silent
+# fallback to the launch directory.
+dataset-root = "./data/raw"
+# Dataloader worker processes per client. Left at 0 by default because Windows
+# spawns rather than forks; the GPU study raises it from the launcher.
+num-workers = 0
 save-model = true
 output-dir = "./artifacts/flower"
 result-kind = "federated_image_pilot"

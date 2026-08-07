@@ -44,6 +44,27 @@ def _partition_id(context: Context) -> int:
     return int(context.node_config["partition-id"])
 
 
+def _dataset_root(context: Context) -> Path:
+    """Return the anchor for this run's relative image paths.
+
+    Missing is an error, not a default: resolving relative manifest paths against
+    the launch directory would make the run depend on where it was started from,
+    and every client would fail on its first image instead of saying why.
+    """
+
+    value = str(context.run_config.get("dataset-root", "")).strip()
+    if not value:
+        raise KeyError(
+            "run_config is missing 'dataset-root'; set it in "
+            "[tool.flwr.app.config] or pass it from the run launcher"
+        )
+    return Path(value).expanduser().resolve()
+
+
+def _num_workers(context: Context) -> int:
+    return int(context.run_config.get("num-workers", 0))
+
+
 def _resolve_taxonomy(context: Context):
     """Resolve the run taxonomy, refusing to guess a scope.
 
@@ -87,6 +108,8 @@ def train(msg: Message, context: Context) -> Message:
         _client_manifest(context, "train_manifest.csv"),
         training=True,
         batch_size=int(context.run_config["batch-size"]),
+        num_workers=_num_workers(context),
+        dataset_root=_dataset_root(context),
     )
     config = msg.content["config"]
     proximal_mu = float(config.get("proximal-mu", 0.0))
@@ -317,6 +340,8 @@ def evaluate(msg: Message, context: Context) -> Message:
         _client_manifest(context, "val_manifest.csv"),
         training=False,
         batch_size=int(context.run_config["batch-size"]),
+        num_workers=_num_workers(context),
+        dataset_root=_dataset_root(context),
     )
     result = evaluate_model(
         model,

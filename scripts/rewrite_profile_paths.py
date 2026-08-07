@@ -1,4 +1,19 @@
-"""Rewrite Flower profile manifests so that their image paths are POSIX-relative.
+"""SUPERSEDED by ``scripts/migrate_manifest_paths.py`` — do not run.
+
+This script hardcoded one container root (``/app/data/``) and rewrote absolute
+Windows paths into absolute POSIX ones, which solved the container case by
+naming a *different* machine.  The profiles now store paths relative to a
+dataset root supplied at run time, so they need no rewriting per environment.
+
+It is kept only because ``docs/10_TEST_REPORT.md`` and
+``docs/11_PLANTVILLAGE_PILOT_REPORT.md`` record runs that used it.  Running it
+against a migrated profile set would corrupt the manifests, so it refuses to
+start.  Use::
+
+    python scripts/migrate_manifest_paths.py \\
+        --dataset-root data/raw/PlantVillage-Dataset/raw/color
+
+Rewrite Flower profile manifests so that their image paths are POSIX-relative.
 
 The flow-prep scripts on Windows saved ``F:\\project\\cropfed-thesis\\data\\…`` paths
 into ``train_manifest.csv`` / ``val_manifest.csv`` / ``test_manifest.csv``.  Those
@@ -137,6 +152,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    raise SystemExit(
+        "scripts/rewrite_profile_paths.py is superseded and would corrupt a "
+        "migrated profile set. Use scripts/migrate_manifest_paths.py instead:\n"
+        "  python scripts/migrate_manifest_paths.py "
+        "--dataset-root data/raw/PlantVillage-Dataset/raw/color"
+    )
+
+
+def _main_before_migration() -> int:
     args = build_parser().parse_args()
     profiles_root = args.profiles_root.resolve()
     if not profiles_root.is_dir():

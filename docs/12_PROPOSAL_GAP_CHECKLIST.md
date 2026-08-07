@@ -367,6 +367,64 @@ Docs mới cập nhật đến 31/07, chưa phản ánh việc chuyển sang 38 
 
 ---
 
+## K. Artifact không chạy được trên máy khác — ĐÃ SỬA 07/08/2026
+
+Không nằm trong bản kiểm kê gốc vì nó không phải khoảng trống so với đề cương mà
+là khoảng trống so với **kế hoạch chạy**: train diễn ra trên máy GPU khác, còn
+manifest thì ghi `F:\project\cropfed-thesis\data\...`. Sáu profile tốn nhiều giờ
+phân hoạch sẽ vô dụng ngay khi rời laptop, và protocol lock khóa SHA-256 của
+chính những manifest đó nên không thể "sửa path lúc chạy".
+
+- [x] K1. Manifest lưu path **tương đối theo dataset root** cấp lúc chạy;
+      `src/cropfed/data/paths.py` là định nghĩa duy nhất. Path tương đối mà thiếu
+      root thì **raise**, không resolve theo CWD — 11 test ở
+      `tests/unit/test_dataset_paths.py`, gồm test chứng minh cùng một manifest
+      resolve được dưới cả `F:/project/.../data/raw` lẫn `/app/data/raw`.
+- [x] K2. `--dataset-root` xuyên suốt prep → audit → dataloader → Flower;
+      `dataset_root` thành tham số **bắt buộc** của `extend_data_profiles` (trước
+      đây optional, và thiếu nó thì audit báo *mọi* ảnh `invalid_image`).
+- [x] K3. `dataset-root` và `num-workers` **khai báo** trong
+      `[tool.flwr.app.config]`; 6 test ở `tests/flower/test_run_config_paths.py`
+      chốt lại, gồm test client và server phải đồng ý về cùng một root.
+- [x] K4. `num_workers` đi từ `run_config` xuống `build_dataloader`. Mặc định 0
+      (an toàn trên Windows) và phải nâng lên trên máy GPU — ghi trong §8.4
+      `06_ROADMAP_AND_HANDOFF`.
+- [x] K5. Migrate 6 profile có sẵn tại chỗ: `scripts/migrate_manifest_paths.py`,
+      7 test ở `tests/system/test_manifest_migration.py`. Kết quả thật:
+      **847.194 dòng, 0 lệch `image_id`**, `--verify` `status: passed`,
+      `missing_files: 0`; audit lại profile `iid` mở được đủ **54.305 ảnh**,
+      `errors=0`. `profiles_index.json` mang `manifest_paths:
+      "relative_to_dataset_root"`, cả hai bất biến D-024 vẫn `true`.
+- [x] K6. `scripts/rewrite_profile_paths.py` đánh dấu Superseded và raise ngay khi
+      chạy — nó vẫn `replace("\\", "/")` nên sẽ làm hỏng bộ đã migrate. Giữ file
+      vì `docs/10` và `docs/11` dẫn chiếu các run đã dùng nó.
+- [x] K7. Trình sinh protocol lock cho cả 15 scenario:
+      `scripts/generate_protocol_locks.py`, import lại `run_main_study.py` để
+      dùng chung ma trận `SCENARIOS`. 10 test + 15 subtest ở
+      `tests/system/test_protocol_lock_generator.py`, trong đó có test cho từng
+      lock đi qua chính `validate_protocol_lock`.
+- [x] K8. `DECISION_LOG` D-033/D-034/D-035; hướng dẫn bàn giao §8
+      `06_ROADMAP_AND_HANDOFF.md`.
+
+### Hai cái bẫy mà test đã khóa lại
+
+`validate_protocol_lock` so khớp `config` **chính xác**, nên hai chi tiết dưới đây
+sẽ khiến run fail *sau khi* đã đốt hết thời gian GPU:
+
+- profile IID phải khóa `dirichlet_alpha = 0.0`, không phải `null` — runner ghi
+  `alpha or 0.0` rồi server cast `float`;
+- cả bốn hyperparameter thuật toán phải có mặt, giá trị 0 khi không áp dụng,
+  đúng như `_algorithm_hyperparameters` sinh ra.
+
+### Bằng chứng
+
+- 164 test đạt / 128 subtest, 23,55s.
+- `artifacts/manifest_migration.json`, `artifacts/post_migration_audit_iid.json`.
+- Báo cáo migration để ở `artifacts/`, **không** để trong bộ profile: nó nêu tên
+  path local, còn bộ profile là thứ được bàn giao (D-025).
+
+---
+
 ## Thứ tự đề xuất
 
 1. ~~**B1–B2**~~ — **XONG 06/08/2026.** `scaffold`/`moon` đã thực sự chạy đúng
@@ -375,13 +433,19 @@ Docs mới cập nhật đến 31/07, chưa phản ánh việc chuyển sang 38 
    audit `passed` cả 6, D-024 kiểm chứng lại trên đĩa.
 3. ~~**H1–H8**~~ — **XONG 07/08/2026.** Launcher chạy được đủ 5 thuật toán × 6
    profile; `fedbn` không còn là no-op. Trước H, A và B là năng lực không dùng được.
-4. **C1–C4** — metric mà §7/§8 gọi là kết quả cốt lõi.
-5. **G1–G4** — đồng bộ docs trước khi khóa protocol.
-6. **D, E, F** — GĐ4 trở đi, sau khi trục so sánh chính đã vững.
+4. ~~**K1–K8**~~ — **XONG 07/08/2026.** Artifact và code chạy được trên máy GPU;
+   protocol lock sinh được cho cả 15 scenario. Trước K, mọi thứ ở trên chỉ chạy
+   trên đúng một cái laptop.
+5. **C1–C4** — metric mà §7/§8 gọi là kết quả cốt lõi.
+6. **G1–G4** — đồng bộ docs trước khi khóa protocol.
+7. **D, E, F** — GĐ4 trở đi, sau khi trục so sánh chính đã vững.
 
 ## Nguyên tắc giữ nguyên
 
 - D-024: mọi profile chia sẻ **một** global test set duy nhất.
 - D-028: artifact pilot mang `research_result_valid=false`, không lọt vào exporter.
 - D-014: không mô tả FL/DP là bảo đảm privacy hoàn chỉnh.
+- D-025: bộ profile bàn giao không chứa path local; báo cáo có path để ở `artifacts/`.
+- D-033: thiếu dataset root thì **raise**, không bao giờ resolve theo CWD.
+- Protocol lock sinh **trước** run mà nó ràng buộc, không sinh từ output của run.
 - Không đánh `[x]` khi chưa có test/artifact chứng minh.

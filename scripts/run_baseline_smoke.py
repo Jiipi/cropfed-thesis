@@ -31,6 +31,7 @@ def run_smoke(output_root: Path) -> dict[str, object]:
         client_data_root=fixture_root / "clients",
         num_clients=4,
         class_names=TOMATO_CLASSES,
+        dataset_root=fixture_root,
     )
     write_audit_report(audit, output_root / "data_audit.json")
     if audit["status"] != "passed":
@@ -48,6 +49,7 @@ def run_smoke(output_root: Path) -> dict[str, object]:
         seed=2026,
         output_dir=output_root / "centralized",
         research_result_valid=False,
+        dataset_root=fixture_root,
     )
     local_only = run_local_only(
         client_data_root=fixture_root / "clients",
@@ -63,6 +65,7 @@ def run_smoke(output_root: Path) -> dict[str, object]:
         partition_kind="dirichlet",
         dirichlet_alpha=0.5,
         research_result_valid=False,
+        dataset_root=fixture_root,
     )
     summary: dict[str, object] = {
         "status": "passed",

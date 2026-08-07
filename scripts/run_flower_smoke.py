@@ -66,6 +66,10 @@ def _run_config(
             f"client-data-root='{(fixture_root / 'clients').as_posix()}'",
             "global-test-manifest="
             f"'{(fixture_root / 'processed' / 'test_manifest.csv').as_posix()}'",
+            # The fixture's manifests are relative to fixture_root, exactly as a
+            # prepared profile is relative to the dataset root.
+            f"dataset-root='{fixture_root.as_posix()}'",
+            "num-workers=0",
             f"output-dir='{output_dir.as_posix()}'",
             "save-model=true",
         ]

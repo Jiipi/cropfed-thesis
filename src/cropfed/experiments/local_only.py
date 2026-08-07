@@ -45,6 +45,8 @@ def run_local_only(
     protocol_lock: Path | None = None,
     class_names: Sequence[str] = TOMATO_CLASSES,
     class_groups: Sequence[str] = TOMATO_CLASS_GROUPS,
+    dataset_root: Path | str | None = None,
+    num_workers: int = 0,
 ) -> dict[str, Any]:
     """Train independent client models from identical seeded initialization."""
 
@@ -100,13 +102,25 @@ def run_local_only(
             pretrained=pretrained,
         )
         train_loader = build_dataloader(
-            train_manifest, training=True, batch_size=batch_size
+            train_manifest,
+            training=True,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            dataset_root=dataset_root,
         )
         validation_loader = build_dataloader(
-            validation_manifest, training=False, batch_size=batch_size
+            validation_manifest,
+            training=False,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            dataset_root=dataset_root,
         )
         global_test_loader = build_dataloader(
-            test_manifest, training=False, batch_size=batch_size
+            test_manifest,
+            training=False,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            dataset_root=dataset_root,
         )
 
         started = time.perf_counter()

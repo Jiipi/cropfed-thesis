@@ -167,6 +167,9 @@ def execute_flower_experiment(
         client_data_root=client_data_root,
         num_clients=spec.num_clients,
         class_names=taxonomy.class_names,
+        dataset_root=_resolve_from(
+            project_root, application_settings.flower_dataset_root
+        ),
     )
     audit_path = output_dir / "pre_run_data_audit.json"
     write_audit_report(audit_report, audit_path)
@@ -281,6 +284,7 @@ def build_flower_command(
             "init-args-log-to-driver=true",
         ]
     )
+    dataset_root = _resolve_from(project_root, application_settings.flower_dataset_root)
     run_config = " ".join(
         [
             f"algorithm='{spec.algorithm}'",
@@ -301,6 +305,8 @@ def build_flower_command(
             f"taxonomy-scope='{application_settings.taxonomy_scope}'",
             f"client-data-root={_toml_string(client_data_root)}",
             f"global-test-manifest={_toml_string(test_manifest)}",
+            f"dataset-root={_toml_string(dataset_root)}",
+            f"num-workers={application_settings.flower_num_workers}",
             f"output-dir={_toml_string(output_dir)}",
             "save-model=true",
         ]

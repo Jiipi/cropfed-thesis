@@ -16,6 +16,7 @@ from cropfed.data.manifest import (
     write_client_manifests,
     write_manifest,
 )
+from cropfed.data.paths import DATASET_ROOT_ENVIRONMENT_VARIABLE
 from cropfed.simulation import run_synthetic_experiment
 
 
@@ -140,6 +141,15 @@ def build_parser() -> argparse.ArgumentParser:
     extend_profiles.add_argument("--validation-fraction", type=float, default=0.2)
     extend_profiles.add_argument("--clients", type=int, default=4)
     extend_profiles.add_argument("--seed", type=int, default=2026)
+    extend_profiles.add_argument(
+        "--dataset-root",
+        type=Path,
+        required=True,
+        help=(
+            "where the manifests' relative image paths are anchored; the dataset "
+            "is not rescanned, but without it the audit can open no image at all"
+        ),
+    )
 
     audit = subparsers.add_parser(
         "audit-data",
@@ -170,6 +180,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("data/processed/data_audit.json"),
+    )
+    audit.add_argument(
+        "--dataset-root",
+        type=Path,
+        help=(
+            "where the manifests' relative image paths are anchored; defaults to "
+            f"${DATASET_ROOT_ENVIRONMENT_VARIABLE}"
+        ),
     )
 
     centralized = subparsers.add_parser(
@@ -222,6 +240,20 @@ def build_parser() -> argparse.ArgumentParser:
     centralized.add_argument(
         "--output-dir", type=Path, default=Path("artifacts/centralized")
     )
+    centralized.add_argument(
+        "--dataset-root",
+        type=Path,
+        help=(
+            "where the manifests' relative image paths are anchored; defaults to "
+            f"${DATASET_ROOT_ENVIRONMENT_VARIABLE}"
+        ),
+    )
+    centralized.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="dataloader worker processes; 0 decodes in the training process",
+    )
 
     local_only = subparsers.add_parser(
         "train-local-only",
@@ -271,6 +303,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     local_only.add_argument(
         "--output-dir", type=Path, default=Path("artifacts/local-only")
+    )
+    local_only.add_argument(
+        "--dataset-root",
+        type=Path,
+        help=(
+            "where the manifests' relative image paths are anchored; defaults to "
+            f"${DATASET_ROOT_ENVIRONMENT_VARIABLE}"
+        ),
+    )
+    local_only.add_argument(
+        "--num-workers",
+        type=int,
+        default=0,
+        help="dataloader worker processes; 0 decodes in the training process",
     )
 
     export = subparsers.add_parser(
@@ -331,12 +377,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "prepare-data":
         taxonomy = taxonomy_from_scope(args.taxonomy)
-        records = scan_plantvillage(args.dataset_root, taxonomy)
+        dataset_root = args.dataset_root.expanduser().resolve()
+        records = scan_plantvillage(dataset_root, taxonomy)
         train, test, split_statistics = content_grouped_stratified_train_test_split(
             records,
             test_fraction=args.test_fraction,
             seed=args.seed,
             num_classes=len(taxonomy.class_names),
+            dataset_root=dataset_root,
         )
         write_manifest(train, args.output_dir / "train_manifest.csv")
         write_manifest(test, args.output_dir / "test_manifest.csv")
@@ -350,6 +398,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             seed=args.seed,
             pooled_output_dir=args.output_dir,
             num_classes=len(taxonomy.class_names),
+            dataset_root=dataset_root,
         )
         print(
             f"prepared manifests: train={len(train)}, test={len(test)}, "
@@ -434,6 +483,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             validation_fraction=args.validation_fraction,
             num_clients=args.clients,
             seed=args.seed,
+            dataset_root=args.dataset_root,
         )
         invariants = result["shared_split_invariants"]
         print(
@@ -456,6 +506,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             client_data_root=args.client_data_root,
             num_clients=args.clients,
             class_names=taxonomy.class_names,
+            dataset_root=args.dataset_root,
         )
         write_audit_report(report, args.output)
         print(
@@ -485,6 +536,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             protocol_lock=args.protocol_lock,
             class_names=taxonomy.class_names,
             class_groups=taxonomy.class_groups,
+            dataset_root=args.dataset_root,
+            num_workers=args.num_workers,
         )
         print(
             f"centralized complete: accuracy={result['metrics']['accuracy']:.4f}, "
@@ -513,6 +566,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             protocol_lock=args.protocol_lock,
             class_names=taxonomy.class_names,
             class_groups=taxonomy.class_groups,
+            dataset_root=args.dataset_root,
+            num_workers=args.num_workers,
         )
         print(
             "local-only complete: "

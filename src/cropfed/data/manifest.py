@@ -17,6 +17,7 @@ from cropfed.constants import (
     DatasetTaxonomy,
 )
 from cropfed.data.partitioning import make_partitions, partition_statistics
+from cropfed.data.paths import resolve_image_path, to_manifest_path
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
@@ -34,7 +35,11 @@ def scan_plantvillage(
     root: Path,
     taxonomy: DatasetTaxonomy,
 ) -> list[ImageRecord]:
-    """Scan every folder required by ``taxonomy`` without copying image bytes."""
+    """Scan every folder required by ``taxonomy`` without copying image bytes.
+
+    Paths are recorded relative to ``root`` so the resulting manifests describe
+    the same experiment on any machine; the root is supplied again at run time.
+    """
 
     root = root.expanduser().resolve()
     if not root.is_dir():
@@ -53,7 +58,7 @@ def scan_plantvillage(
                 records.append(
                     ImageRecord(
                         image_id=image_id,
-                        path=str(path),
+                        path=to_manifest_path(path, root),
                         label_id=label_id,
                         label_name=class_name,
                     )
@@ -113,6 +118,7 @@ def content_grouped_stratified_train_test_split(
     seed: int = 2026,
     *,
     num_classes: int,
+    dataset_root: Path | None = None,
 ) -> tuple[list[ImageRecord], list[ImageRecord], dict[str, object]]:
     """Stratify without allowing exact-content duplicates across the split.
 
@@ -132,7 +138,7 @@ def content_grouped_stratified_train_test_split(
     labels_by_hash: dict[str, set[int]] = defaultdict(set)
     hashes_by_index: list[str] = []
     for index, row in enumerate(rows):
-        digest = _sha256_file(Path(row.path))
+        digest = _sha256_file(resolve_image_path(row.path, dataset_root))
         hashes_by_index.append(digest)
         groups_by_hash[digest].append(index)
         labels_by_hash[digest].add(row.label_id)
@@ -244,6 +250,7 @@ def write_client_manifests(
     seed: int = 2026,
     pooled_output_dir: Path | None = None,
     num_classes: int,
+    dataset_root: Path | None = None,
 ) -> list[dict[str, object]]:
     """Partition records and create local plus optional pooled train/validation files."""
 
@@ -251,7 +258,7 @@ def write_client_manifests(
         raise ValueError("validation_fraction must be between 0 and 1")
     rows = list(train_records)
     labels = np.asarray([row.label_id for row in rows], dtype=np.int64)
-    content_keys = [_client_partition_group_key(row) for row in rows]
+    content_keys = [_client_partition_group_key(row, dataset_root) for row in rows]
     grouped_indices: dict[str, list[int]] = defaultdict(list)
     grouped_labels: dict[str, int] = {}
     for index, (row, content_key) in enumerate(
@@ -424,8 +431,15 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _client_partition_group_key(record: ImageRecord) -> str:
-    path = Path(record.path).expanduser()
+def _client_partition_group_key(
+    record: ImageRecord, dataset_root: Path | None = None
+) -> str:
+    try:
+        path = resolve_image_path(record.path, dataset_root)
+    except ValueError:
+        # A relative path with no root cannot be hashed; fall through to the
+        # id-based key below rather than failing the whole partition.
+        return f"image-id:{record.image_id}"
     if path.is_file():
         return f"sha256:{_sha256_file(path)}"
     # Dependency-light unit tests may use virtual paths. Unique IDs retain the

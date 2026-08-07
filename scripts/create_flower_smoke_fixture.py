@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 from cropfed.constants import TOMATO_CLASSES
 from cropfed.data.audit import audit_prepared_data, write_audit_report
 from cropfed.data.manifest import ImageRecord, write_manifest
+from cropfed.data.paths import to_manifest_path
 
 
 def create_fixture(output_root: Path, *, num_clients: int = 4) -> dict[str, object]:
@@ -92,6 +93,7 @@ def create_fixture(output_root: Path, *, num_clients: int = 4) -> dict[str, obje
         client_data_root=client_root,
         class_names=TOMATO_CLASSES,
         num_clients=num_clients,
+        dataset_root=output_root,
     )
     audit_path = processed_root / "data_audit.json"
     write_audit_report(report, audit_path)
@@ -101,6 +103,10 @@ def create_fixture(output_root: Path, *, num_clients: int = 4) -> dict[str, obje
     summary: dict[str, object] = {
         "fixture_kind": "synthetic_images_for_integration_only",
         "output_root": output_root.as_posix(),
+        # The manifests hold paths relative to this root, exactly as a prepared
+        # PlantVillage profile does, so the smoke exercises the same resolution
+        # the main study depends on rather than a shortcut around it.
+        "dataset_root": output_root.as_posix(),
         "client_data_root": client_root.as_posix(),
         "train_manifest": train_manifest.as_posix(),
         "pooled_train_manifest": pooled_train_manifest.as_posix(),
@@ -128,7 +134,10 @@ def _record(
     normalized = relative_path.as_posix()
     return ImageRecord(
         image_id=hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16],
-        path=str((output_root / relative_path).resolve()),
+        # Relative to output_root, matching a real prepared profile. output_root
+        # is kept as a parameter because the caller's fixture layout is what
+        # defines the anchor, even though the value no longer appears here.
+        path=to_manifest_path(output_root / relative_path, output_root),
         label_id=label_id,
         label_name=TOMATO_CLASSES[label_id],
         split=split,
