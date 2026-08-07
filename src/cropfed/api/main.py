@@ -67,6 +67,7 @@ from cropfed.api.schemas import (
 from cropfed.api.settings import Settings, settings
 from cropfed.config import ExperimentConfig
 from cropfed.constants import OFFICIAL_TITLE, taxonomy_from_scope
+from cropfed.ml.metrics import client_fairness, gap_vs_centralized
 from cropfed.simulation import run_synthetic_experiment
 
 SyntheticExecutor = Callable[[ExperimentConfig], dict[str, object]]
@@ -294,6 +295,7 @@ def create_app(
                 detail={"message": "experiments not found", "ids": missing_ids},
             )
         items = []
+        baseline = _load_centralized_baseline(application_settings)
         for experiment_id in ids:
             record = session.get(ExperimentRecord, experiment_id)
             assert record is not None
@@ -321,6 +323,21 @@ def create_app(
                 for cr in client_records
                 if cr.phase == "evaluate" and cr.round_number == selected_round
             ]
+            client_examples = [
+                int(cr.num_examples)
+                for cr in client_records
+                if cr.phase == "evaluate" and cr.round_number == selected_round
+            ]
+            fairness = (
+                client_fairness(
+                    client_f1s,
+                    num_examples=(
+                        client_examples if sum(client_examples) > 0 else None
+                    ),
+                )
+                if len(client_f1s) >= 2
+                else None
+            )
             selected_metrics = next(
                 (row for row in rounds if row.round_number == selected_round),
                 rounds[-1] if rounds else None,
@@ -328,6 +345,29 @@ def create_app(
             global_test = result_payload.get("global_test", {})
             if not isinstance(global_test, dict):
                 global_test = {}
+            final_accuracy = global_test.get(
+                "global_test_accuracy",
+                selected_metrics.accuracy if selected_metrics else None,
+            )
+            final_macro_f1 = global_test.get(
+                "global_test_macro_f1",
+                selected_metrics.macro_f1 if selected_metrics else None,
+            )
+            # Only compare against a baseline trained with the same seed: a
+            # different seed makes the gap partly a seed difference, which is
+            # exactly the confusion §8's core result cannot afford.
+            gap = (
+                {
+                    "accuracy": gap_vs_centralized(
+                        final_accuracy, baseline["accuracy"]
+                    ),
+                    "macro_f1": gap_vs_centralized(
+                        final_macro_f1, baseline["macro_f1"]
+                    ),
+                }
+                if baseline is not None and baseline["seed"] == record.seed
+                else None
+            )
             items.append({
                 "id": record.id,
                 "name": record.name,
@@ -340,14 +380,8 @@ def create_app(
                 "seed": record.seed,
                 "execution_mode": record.execution_mode,
                 "selected_round": selected_round or None,
-                "final_accuracy": global_test.get(
-                    "global_test_accuracy",
-                    selected_metrics.accuracy if selected_metrics else None,
-                ),
-                "final_macro_f1": global_test.get(
-                    "global_test_macro_f1",
-                    selected_metrics.macro_f1 if selected_metrics else None,
-                ),
+                "final_accuracy": final_accuracy,
+                "final_macro_f1": final_macro_f1,
                 "final_harmful_rate": (
                     global_test.get("global_test_harmful_missed_as_healthy_rate")
                     if global_test
@@ -361,6 +395,8 @@ def create_app(
                 "client_f1s": client_f1s if client_f1s else None,
                 "worst_client_f1": min(client_f1s) if client_f1s else None,
                 "mean_client_f1": sum(client_f1s) / len(client_f1s) if client_f1s else None,
+                "fairness": fairness,
+                "gap_vs_centralized": gap,
                 "round_history": [
                     {
                         "round": r.round_number,
@@ -371,7 +407,10 @@ def create_app(
                     for r in rounds
                 ],
             })
-        return {"items": items}
+        return {
+            "items": items,
+            "centralized_baseline": baseline,
+        }
 
     @application.get(
         "/api/v1/experiments/export-csv",
@@ -863,6 +902,52 @@ def _to_client_public(record: ClientRecord) -> ClientPublic:
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
+
+
+def _load_centralized_baseline(
+    application_settings: Settings,
+) -> dict[str, object] | None:
+    """Read the configured centralized baseline, or return ``None``.
+
+    Only a *research-valid* centralized result is accepted. A pilot artifact
+    carries ``research_result_valid=false`` (D-028) and comparing against it
+    would put a number the exporter refuses to publish onto the dashboard as
+    the thesis's headline result.
+
+    Failures are absorbed rather than raised: the gap is an extra column, and a
+    missing or malformed baseline file must not take the comparison view down.
+    """
+
+    configured = application_settings.centralized_baseline_result
+    if configured is None:
+        return None
+    path = configured.expanduser()
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("experiment_type") != "centralized":
+        return None
+    if payload.get("research_result_valid") is not True:
+        return None
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    # Every Flower experiment this server runs uses one configured backbone, so
+    # a baseline trained with a different one would turn an architecture
+    # difference into a reported federation cost.
+    if payload.get("model") != application_settings.flower_model_name:
+        return None
+    return {
+        "accuracy": metrics.get("accuracy"),
+        "macro_f1": metrics.get("macro_f1"),
+        "model": payload.get("model"),
+        "seed": payload.get("seed"),
+    }
 
 
 def _resolve_deployed_checkpoint(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import statistics
 from collections.abc import Sequence
 from typing import Any
 
@@ -129,3 +131,103 @@ def classification_metrics(
             class_names=group_names,
         )
     return result
+
+
+def client_fairness(
+    scores: Sequence[float],
+    *,
+    num_examples: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """Summarise how unevenly one metric is spread across clients.
+
+    The proposal (§7) asks for "độ lệch accuracy giữa cơ sở mạnh và yếu" and
+    warns that a good federation must not abandon small facilities. That makes
+    two conventions non-negotiable here, and both are the opposite of what the
+    aggregate metrics do:
+
+    * The mean is **unweighted** — one client, one vote. Weighting by sample
+      count is what hides an abandoned small client, because the clients being
+      abandoned are precisely the ones with little data. ``weighted_mean`` is
+      reported alongside it so the two can be compared: when it sits well above
+      ``mean``, the large clients are carrying the score.
+    * The deviation is the **population** standard deviation. These clients are
+      the whole federation, not a sample drawn from one, so dividing by ``n-1``
+      would inflate the number by 15% at four clients and make the run look
+      less fair than it is.
+    """
+
+    values = [float(score) for score in scores]
+    if not values:
+        raise ValueError("fairness needs at least one client score")
+    if any(math.isnan(value) or math.isinf(value) for value in values):
+        raise ValueError("client scores must be finite")
+
+    mean = statistics.fmean(values)
+    worst = min(values)
+    best = max(values)
+    result: dict[str, Any] = {
+        "num_clients": len(values),
+        "mean": mean,
+        "worst": worst,
+        "best": best,
+        # Population standard deviation: these clients are the federation.
+        "std": statistics.pstdev(values),
+        "spread": best - worst,
+        # Scale-free, so an accuracy spread and an F1 spread are comparable —
+        # but undefined at mean 0, where the ratio carries no information.
+        "coefficient_of_variation": (
+            statistics.pstdev(values) / mean if mean > 0 else None
+        ),
+    }
+
+    if num_examples is None:
+        return result
+
+    sizes = [int(count) for count in num_examples]
+    if len(sizes) != len(values):
+        raise ValueError("num_examples must have one entry per client score")
+    if any(count < 0 for count in sizes):
+        raise ValueError("num_examples cannot be negative")
+    total = sum(sizes)
+    if total == 0:
+        raise ValueError("num_examples must not sum to zero")
+
+    weighted_mean = (
+        sum(value * count for value, count in zip(values, sizes, strict=True)) / total
+    )
+    smallest = min(range(len(sizes)), key=lambda index: sizes[index])
+    largest = max(range(len(sizes)), key=lambda index: sizes[index])
+    result.update(
+        {
+            "weighted_mean": weighted_mean,
+            # Positive means the big clients score above the federation average,
+            # which is the shape of "small facilities left behind" (§7).
+            "size_advantage": weighted_mean - mean,
+            "smallest_client_score": values[smallest],
+            "largest_client_score": values[largest],
+            "smallest_client_examples": sizes[smallest],
+            "largest_client_examples": sizes[largest],
+        }
+    )
+    return result
+
+
+def gap_vs_centralized(
+    federated_score: float | None,
+    centralized_score: float | None,
+) -> float | None:
+    """Return how far a federated score falls short of the centralized one.
+
+    Signed as ``centralized - federated`` so that a **positive** gap always
+    means the federation is behind, matching §3's "khoảng cách accuracy nhỏ,
+    ví dụ dưới vài phần trăm". The sign is worth stating in one place: an
+    inverted gap column would read as the federation beating centralized
+    training, which is the thesis's central claim pointing backwards.
+
+    ``None`` when either side is missing — never ``0.0``, which would claim the
+    federation exactly matched a baseline that was never run.
+    """
+
+    if federated_score is None or centralized_score is None:
+        return None
+    return float(centralized_score) - float(federated_score)

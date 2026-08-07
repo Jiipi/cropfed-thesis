@@ -273,26 +273,75 @@ làm fail đúng 2 test, khôi phục xong 23 test đạt lại.
 
 ---
 
-## C. Metric fairness và gap-vs-centralized — P1
+## C. Metric fairness và gap-vs-centralized — ĐÃ SỬA 07/08/2026
 
 > §7: "báo cáo **KHOẢNG CÁCH** so với mô hình tập trung"
 > §7: "**Tính công bằng** — độ lệch accuracy giữa cơ sở mạnh và yếu; hệ phân tán tốt
 > không được bỏ rơi cơ sở nhỏ"
 > §3: "khoảng cách accuracy nhỏ, ví dụ dưới vài phần trăm"
 
-Hiện có `worst_client_f1` (`api/main.py:362`, `export.py:32`, dashboard
-`App.jsx:470`) — đó là **sàn**, không phải **độ lệch**. `ml/metrics.py` chỉ có
-`confusion_matrix` và `classification_metrics`; không có hàm fairness nào.
+Trước đó chỉ có `worst_client_f1` — đó là **sàn**, không phải **độ lệch**: bốn client
+ở 0,70/0,70/0,70/0,40 và bốn client ở 0,95/0,80/0,55/0,40 cho cùng một con số sàn,
+trong khi cái thứ hai mới là liên đoàn đang bỏ rơi cơ sở nhỏ. Gap-vs-centralized thì
+phải tự trừ bằng mắt khi đọc bảng, dù §8 gọi đây là "kết quả cốt lõi của đề tài".
 
-Gap-vs-centralized hiện phải tự tính mắt thường khi đọc bảng comparison — trong khi
-đề cương gọi đây là "kết quả cốt lõi của đề tài" (§8).
+- [x] C1. `client_fairness` trong `ml/metrics.py`: `std`, `spread` (best−worst),
+      `coefficient_of_variation`, và khi có `num_examples` thì thêm `weighted_mean`
+      + `size_advantage`. Trung bình là **không trọng số** và độ lệch chuẩn là của
+      **quần thể** — xem "Hai quy ước" bên dưới.
+- [x] C2. `gap_vs_centralized` là cột dẫn xuất trong comparison export
+      (`gap_vs_centralized_accuracy`, `gap_vs_centralized_macro_f1`,
+      `gap_baseline_run_id`), cùng bốn cột fairness. Ghép baseline theo
+      **(seed, model)**, không phải seed đơn thuần.
+- [x] C3. Dashboard có hai dòng mới cạnh Worst-Client F1: "Độ lệch giữa client"
+      (std · spread) và "Khoảng cách vs tập trung", kèm chú thích dấu dương nghĩa là
+      FL còn kém hơn. Mốc so sánh lấy từ `CROPFED_CENTRALIZED_BASELINE_RESULT`
+      (đường dẫn phía server, HTTP không cấp được — D-019).
+- [x] C4. 27 test mới: 11 ở `tests/unit/test_metrics.py`, 8 ở `tests/api/test_export.py`,
+      8 ở `tests/api/test_new_endpoints.py`.
 
-- [ ] C1. Thêm metric fairness tường minh: độ lệch chuẩn accuracy/Macro-F1 giữa các
-      client, và khoảng cách best−worst.
-- [ ] C2. Thêm `gap_vs_centralized` (accuracy và Macro-F1) vào comparison export —
-      cột dẫn xuất, tính từ scenario centralized cùng seed.
-- [ ] C3. Hiện `gap` và `fairness` trên dashboard cạnh worst-client F1.
-- [ ] C4. Test cho cả hai nhóm metric.
+### Hai quy ước, cả hai đều ngược với metric tổng hợp
+
+**Trung bình không trọng số.** Trọng số theo số mẫu chính là thứ che mất một cơ sở
+nhỏ bị bỏ rơi, vì cơ sở bị bỏ rơi đúng là cơ sở ít dữ liệu. Test
+`test_unweighted_mean_does_not_hide_an_abandoned_small_client` khóa lại tình huống
+này: một client 10 mẫu ở 0,10 với ba client 1.000 mẫu ở 0,90 — `weighted_mean` vẫn
+0,88 trông rất khỏe, còn `mean` tụt xuống 0,70 và `size_advantage` gọi tên hiệu ứng.
+
+**Độ lệch chuẩn quần thể, không phải mẫu.** Bốn client này *là* toàn bộ liên đoàn,
+không phải mẫu rút ra từ liên đoàn nào lớn hơn. Chia cho `n−1` sẽ thổi con số lên
+~15% ở bốn client, làm run trông kém công bằng hơn thực tế.
+
+### Dấu của gap
+
+`gap = centralized − federated`, nên **dương luôn nghĩa là FL còn kém hơn**. Đảo dấu
+sẽ đọc thành liên đoàn thắng mô hình tập trung — đúng luận điểm trung tâm của đề tài
+nhưng quay ngược. Mutation test: đảo dấu làm fail 4 test ở cả ba lớp (metric, export,
+API); đổi `pstdev` thành `stdev` làm fail 5 test.
+
+### Ba cách cột gap có thể so nhầm — đã chặn
+
+- **Khác backbone**: baseline MobileNetV2 với run MobileNetV3 sẽ báo chênh lệch kiến
+  trúc thành cái giá của liên đoàn. Export ghép theo `(seed, model)`; API từ chối
+  baseline không trùng `flower_model_name`.
+- **Khác seed**: gap sẽ lẫn một phần chênh lệch seed. Run không có seed thì không bao
+  giờ được ghép cặp.
+- **Baseline pilot**: `research_result_valid=false` bị từ chối, đúng D-028 — không thể
+  lấy con số mà exporter từ chối xuất bản làm kết quả đầu bảng.
+
+Thiếu mốc thì cột để **trống**, không phải `0.0`: `0.0` sẽ khẳng định liên đoàn hòa
+đúng bằng một baseline chưa từng chạy. Một client thì `std`/`spread` cũng để trống —
+một client không phải một liên đoàn, và `0.0` sẽ đọc thành công bằng tuyệt đối.
+
+### Bằng chứng
+
+- `pytest tests` → **230 test đạt / 128 subtest**, 33,58s. Đây là lần đầu `tests/api`
+  chạy được: mục C cài `fastapi` bằng `pip install -e ".[api,dev]"`, nên ghi chú
+  "`tests/api` không collect được" ở các mục trước đã hết hiệu lực.
+- `frontend/` chưa có hạ tầng test (không có vitest/jest trong `package.json`), nên
+  C3 được phủ ở tầng API — test kiểm đúng dữ liệu mà dashboard render.
+- Đính chính: dashboard nằm ở `frontend/src/App.jsx`, không phải
+  `web/dashboard/src/App.jsx` như bản checklist trước ghi.
 
 ---
 
@@ -418,7 +467,9 @@ sẽ khiến run fail *sau khi* đã đốt hết thời gian GPU:
 
 ### Bằng chứng
 
-- 164 test đạt / 128 subtest, 23,55s.
+- 164 test đạt / 128 subtest, 23,55s — đo lúc `tests/api` còn chưa collect được.
+  Mục C sau đó cài `fastapi` (`pip install -e ".[api,dev]"`), nên con số hiện
+  hành cho **toàn bộ** suite là 230 test đạt / 128 subtest.
 - `artifacts/manifest_migration.json`, `artifacts/post_migration_audit_iid.json`.
 - Báo cáo migration để ở `artifacts/`, **không** để trong bộ profile: nó nêu tên
   path local, còn bộ profile là thứ được bàn giao (D-025).
@@ -436,7 +487,8 @@ sẽ khiến run fail *sau khi* đã đốt hết thời gian GPU:
 4. ~~**K1–K8**~~ — **XONG 07/08/2026.** Artifact và code chạy được trên máy GPU;
    protocol lock sinh được cho cả 15 scenario. Trước K, mọi thứ ở trên chỉ chạy
    trên đúng một cái laptop.
-5. **C1–C4** — metric mà §7/§8 gọi là kết quả cốt lõi.
+5. ~~**C1–C4**~~ — **XONG 07/08/2026.** Fairness là độ lệch chứ không còn là sàn;
+   gap-vs-centralized thành cột thay vì phép trừ bằng mắt.
 6. **G1–G4** — đồng bộ docs trước khi khóa protocol.
 7. **D, E, F** — GĐ4 trở đi, sau khi trục so sánh chính đã vững.
 
@@ -448,4 +500,7 @@ sẽ khiến run fail *sau khi* đã đốt hết thời gian GPU:
 - D-025: bộ profile bàn giao không chứa path local; báo cáo có path để ở `artifacts/`.
 - D-033: thiếu dataset root thì **raise**, không bao giờ resolve theo CWD.
 - Protocol lock sinh **trước** run mà nó ràng buộc, không sinh từ output của run.
+- D-036: fairness dùng trung bình **không trọng số** + độ lệch chuẩn **quần thể**;
+  `gap = centralized − federated` nên dương nghĩa là FL còn kém hơn.
+- Thiếu mốc so sánh thì để **trống**, không bao giờ điền `0.0`.
 - Không đánh `[x]` khi chưa có test/artifact chứng minh.

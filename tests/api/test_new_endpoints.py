@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
-from sqlmodel import SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
 from cropfed.api.main import create_app
+from cropfed.api.models import (
+    ClientRoundMetricRecord,
+    ExperimentRecord,
+    ExperimentRoundRecord,
+)
 from cropfed.api.settings import Settings
 from cropfed.constants import taxonomy_from_scope
 
@@ -22,6 +29,7 @@ def make_test_client(
     *,
     settings: Settings | None = None,
     prediction_executor=None,
+    return_engine: bool = False,
 ):
     engine = create_engine(
         "sqlite://",
@@ -39,7 +47,8 @@ def make_test_client(
         application_settings=test_settings,
         prediction_executor=prediction_executor,
     )
-    return TestClient(app)
+    client = TestClient(app)
+    return (client, engine) if return_engine else client
 
 
 def png_bytes() -> bytes:
@@ -286,3 +295,297 @@ def test_cors_preflight_allows_patch_and_delete():
         )
         assert response.status_code == 200
         assert method in response.headers["access-control-allow-methods"]
+
+
+def seed_flower_result(
+    engine,
+    experiment_id: str,
+    *,
+    client_f1s: list[float],
+    accuracy: float = 0.80,
+    macro_f1: float = 0.78,
+    client_examples: list[int] | None = None,
+) -> None:
+    """Attach a one-round Flower result with per-client evaluate rows."""
+
+    sizes = client_examples or [100] * len(client_f1s)
+    with Session(engine) as session:
+        record = session.get(ExperimentRecord, experiment_id)
+        assert record is not None
+        record.status = "completed"
+        record.result_json = json.dumps(
+            {
+                "algorithm": record.algorithm,
+                "history": [],
+                "global_test": {
+                    "global_test_accuracy": accuracy,
+                    "global_test_macro_f1": macro_f1,
+                },
+                "selection": {"best_round": 1},
+            }
+        )
+        session.add(record)
+        session.add(
+            ExperimentRoundRecord(
+                experiment_id=experiment_id,
+                round_number=1,
+                metrics_json="{}",
+                accuracy=accuracy,
+                macro_f1=macro_f1,
+            )
+        )
+        for client_id, score in enumerate(client_f1s):
+            session.add(
+                ClientRoundMetricRecord(
+                    experiment_id=experiment_id,
+                    round_number=1,
+                    client_id=client_id,
+                    phase="evaluate",
+                    node_id=f"node-{client_id}",
+                    num_examples=sizes[client_id],
+                    metrics_json=json.dumps({"eval_macro_f1": score}),
+                    payload_download_bytes=0,
+                    payload_upload_bytes=0,
+                    model_download_bytes=0,
+                    model_upload_bytes=0,
+                )
+            )
+        session.commit()
+
+
+def write_centralized_baseline(
+    directory: Path,
+    *,
+    seed: int = 2026,
+    accuracy: float = 0.90,
+    macro_f1: float = 0.88,
+    research_result_valid: bool = True,
+) -> Path:
+    path = directory / "centralized_result.json"
+    path.write_text(
+        json.dumps(
+            {
+                "experiment_type": "centralized",
+                "model": "mobilenet_v3_small",
+                "seed": seed,
+                "research_result_valid": research_result_valid,
+                "metrics": {"accuracy": accuracy, "macro_f1": macro_f1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def compare_two(client):
+    first = client.post("/api/v1/experiments", json={"name": "Run A"}).json()
+    second = client.post("/api/v1/experiments", json={"name": "Run B"}).json()
+    return first, second
+
+
+def test_compare_reports_client_spread_not_only_the_floor():
+    client, engine = make_test_client(return_engine=True)
+    experiment = client.post("/api/v1/experiments", json={"name": "Run A"}).json()
+    other = client.post("/api/v1/experiments", json={"name": "Run B"}).json()
+    seed_flower_result(engine, experiment["id"], client_f1s=[0.4, 0.6, 0.8, 1.0])
+
+    response = client.get(
+        f"/api/v1/experiments/compare?ids={experiment['id']}&ids={other['id']}"
+    )
+
+    assert response.status_code == 200
+    item = next(i for i in response.json()["items"] if i["id"] == experiment["id"])
+    fairness = item["fairness"]
+    assert fairness["worst"] == 0.4
+    assert fairness["best"] == 1.0
+    assert fairness["mean"] == 0.7
+    assert fairness["spread"] == pytest.approx(0.6)
+    assert fairness["std"] == pytest.approx(0.223606797749979)
+    assert item["worst_client_f1"] == 0.4
+
+
+def test_compare_fairness_exposes_a_small_client_left_behind():
+    client, engine = make_test_client(return_engine=True)
+    experiment = client.post("/api/v1/experiments", json={"name": "Run A"}).json()
+    other = client.post("/api/v1/experiments", json={"name": "Run B"}).json()
+    seed_flower_result(
+        engine,
+        experiment["id"],
+        client_f1s=[0.10, 0.90, 0.90, 0.90],
+        client_examples=[10, 1_000, 1_000, 1_000],
+    )
+
+    response = client.get(
+        f"/api/v1/experiments/compare?ids={experiment['id']}&ids={other['id']}"
+    )
+
+    fairness = next(
+        i for i in response.json()["items"] if i["id"] == experiment["id"]
+    )["fairness"]
+    # The weighted mean still looks healthy; the unweighted one does not. That
+    # difference is the signal §7 asks for.
+    assert fairness["weighted_mean"] > 0.88
+    assert fairness["mean"] == pytest.approx(0.70)
+    assert fairness["size_advantage"] > 0.18
+    assert fairness["smallest_client_examples"] == 10
+
+
+def test_compare_fairness_is_null_for_a_single_client():
+    client, engine = make_test_client(return_engine=True)
+    experiment = client.post("/api/v1/experiments", json={"name": "Run A"}).json()
+    other = client.post("/api/v1/experiments", json={"name": "Run B"}).json()
+    seed_flower_result(engine, experiment["id"], client_f1s=[0.7])
+
+    response = client.get(
+        f"/api/v1/experiments/compare?ids={experiment['id']}&ids={other['id']}"
+    )
+
+    item = next(i for i in response.json()["items"] if i["id"] == experiment["id"])
+    assert item["fairness"] is None
+    assert item["worst_client_f1"] == 0.7
+
+
+def test_compare_gap_is_positive_when_federation_trails_centralized():
+    with tempfile.TemporaryDirectory() as temporary:
+        baseline = write_centralized_baseline(
+            Path(temporary), seed=2026, accuracy=0.90, macro_f1=0.88
+        )
+        client, engine = make_test_client(
+            settings=Settings(
+                database_url="sqlite://",
+                cors_origins=("http://localhost:5173",),
+                centralized_baseline_result=baseline,
+            ),
+            return_engine=True,
+        )
+        first, second = compare_two(client)
+        seed_flower_result(
+            engine,
+            first["id"],
+            client_f1s=[0.7, 0.8],
+            accuracy=0.85,
+            macro_f1=0.83,
+        )
+
+        response = client.get(
+            f"/api/v1/experiments/compare?ids={first['id']}&ids={second['id']}"
+        )
+
+        payload = response.json()
+        item = next(i for i in payload["items"] if i["id"] == first["id"])
+        assert item["gap_vs_centralized"]["accuracy"] == pytest.approx(0.05)
+        assert item["gap_vs_centralized"]["macro_f1"] == pytest.approx(0.05)
+        assert payload["centralized_baseline"]["macro_f1"] == 0.88
+
+
+def test_compare_gap_is_null_when_baseline_seed_differs():
+    with tempfile.TemporaryDirectory() as temporary:
+        baseline = write_centralized_baseline(Path(temporary), seed=9999)
+        client, engine = make_test_client(
+            settings=Settings(
+                database_url="sqlite://",
+                cors_origins=("http://localhost:5173",),
+                centralized_baseline_result=baseline,
+            ),
+            return_engine=True,
+        )
+        first, second = compare_two(client)
+        seed_flower_result(engine, first["id"], client_f1s=[0.7, 0.8])
+
+        response = client.get(
+            f"/api/v1/experiments/compare?ids={first['id']}&ids={second['id']}"
+        )
+
+        item = next(i for i in response.json()["items"] if i["id"] == first["id"])
+        assert item["gap_vs_centralized"] is None
+
+
+def test_compare_refuses_a_pilot_baseline():
+    """D-028: a pilot artifact must not become the thesis's headline comparison."""
+
+    with tempfile.TemporaryDirectory() as temporary:
+        baseline = write_centralized_baseline(
+            Path(temporary), research_result_valid=False
+        )
+        client, engine = make_test_client(
+            settings=Settings(
+                database_url="sqlite://",
+                cors_origins=("http://localhost:5173",),
+                centralized_baseline_result=baseline,
+            ),
+            return_engine=True,
+        )
+        first, second = compare_two(client)
+        seed_flower_result(engine, first["id"], client_f1s=[0.7, 0.8])
+
+        response = client.get(
+            f"/api/v1/experiments/compare?ids={first['id']}&ids={second['id']}"
+        )
+
+        payload = response.json()
+        assert payload["centralized_baseline"] is None
+        assert payload["items"][0]["gap_vs_centralized"] is None
+
+
+def test_compare_refuses_a_baseline_trained_on_a_different_backbone():
+    """An architecture difference must not be reported as a federation cost."""
+
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "centralized_result.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "experiment_type": "centralized",
+                    "model": "mobilenet_v2",
+                    "seed": 2026,
+                    "research_result_valid": True,
+                    "metrics": {"accuracy": 0.90, "macro_f1": 0.88},
+                }
+            ),
+            encoding="utf-8",
+        )
+        client, engine = make_test_client(
+            settings=Settings(
+                database_url="sqlite://",
+                cors_origins=("http://localhost:5173",),
+                flower_model_name="mobilenet_v3_small",
+                centralized_baseline_result=path,
+            ),
+            return_engine=True,
+        )
+        first, second = compare_two(client)
+        seed_flower_result(engine, first["id"], client_f1s=[0.7, 0.8])
+
+        response = client.get(
+            f"/api/v1/experiments/compare?ids={first['id']}&ids={second['id']}"
+        )
+
+        payload = response.json()
+        assert payload["centralized_baseline"] is None
+        assert payload["items"][0]["gap_vs_centralized"] is None
+
+
+def test_compare_survives_a_missing_or_malformed_baseline_file():
+    """The gap is one extra column; it must not take the comparison view down."""
+
+    with tempfile.TemporaryDirectory() as temporary:
+        broken = Path(temporary) / "broken.json"
+        broken.write_text("{not json", encoding="utf-8")
+        for configured in (broken, Path(temporary) / "absent.json"):
+            client, engine = make_test_client(
+                settings=Settings(
+                    database_url="sqlite://",
+                    cors_origins=("http://localhost:5173",),
+                    centralized_baseline_result=configured,
+                ),
+                return_engine=True,
+            )
+            first, second = compare_two(client)
+            seed_flower_result(engine, first["id"], client_f1s=[0.7, 0.8])
+
+            response = client.get(
+                f"/api/v1/experiments/compare?ids={first['id']}&ids={second['id']}"
+            )
+
+            assert response.status_code == 200
+            assert response.json()["centralized_baseline"] is None

@@ -1077,6 +1077,32 @@ function CompareSection({ data }) {
               ))}
             </tr>
             <tr>
+              <th>
+                Độ lệch giữa client
+                <div className="fine-print">Std · best−worst (Macro F1)</div>
+              </th>
+              {data.items.map((item) => (
+                <td key={item.id}>
+                  {item.fairness
+                    ? `${item.fairness.std.toFixed(4)} · ${item.fairness.spread.toFixed(4)}`
+                    : "—"}
+                </td>
+              ))}
+            </tr>
+            <tr>
+              <th>
+                Khoảng cách vs tập trung
+                <div className="fine-print">Dương = FL còn kém hơn</div>
+              </th>
+              {data.items.map((item) => (
+                <td key={item.id}>
+                  {item.gap_vs_centralized?.macro_f1 != null
+                    ? item.gap_vs_centralized.macro_f1.toFixed(4)
+                    : "—"}
+                </td>
+              ))}
+            </tr>
+            <tr>
               <th>Bỏ sót có hại</th>
               {data.items.map((item) => (
                 <td key={item.id}>
@@ -1103,6 +1129,17 @@ function CompareSection({ data }) {
           </tbody>
         </table>
       </div>
+
+      <p className="fine-print">
+        {data.centralized_baseline
+          ? `Khoảng cách được tính so với mô hình tập trung (${data.centralized_baseline.model}, seed ${data.centralized_baseline.seed}, Macro F1 ${data.centralized_baseline.macro_f1?.toFixed(4) ?? "—"}). Chỉ những thí nghiệm cùng seed mới có giá trị khoảng cách.`
+          : "Chưa cấu hình mô hình tập trung làm mốc so sánh, nên cột khoảng cách để trống. Dấu “—” ở đây nghĩa là chưa có mốc, không phải khoảng cách bằng 0."}
+      </p>
+      <p className="fine-print">
+        Độ lệch giữa client dùng độ lệch chuẩn của cả liên đoàn (không phải mẫu) và
+        trung bình không trọng số — trung bình có trọng số theo số mẫu sẽ che mất
+        đúng những cơ sở nhỏ mà tiêu chí công bằng cần phát hiện.
+      </p>
     </section>
   );
 }

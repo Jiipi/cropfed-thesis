@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from cropfed.constants import PROJECT_VERSION
+from cropfed.ml.metrics import client_fairness, gap_vs_centralized
 
 COMPARISON_FIELDS = (
     "run_id",
@@ -30,6 +31,13 @@ COMPARISON_FIELDS = (
     "macro_recall",
     "macro_f1",
     "worst_client_macro_f1",
+    "best_client_macro_f1",
+    "mean_client_macro_f1",
+    "client_macro_f1_std",
+    "client_macro_f1_spread",
+    "gap_vs_centralized_accuracy",
+    "gap_vs_centralized_macro_f1",
+    "gap_baseline_run_id",
     "harmful_missed_as_healthy_rate",
     "spider_mite_f1",
     "elapsed_seconds",
@@ -79,6 +87,8 @@ def export_results(
                 "run_id": str(normalized["comparison"]["run_id"]),
             }
         )
+
+    _apply_gap_columns(comparison_rows)
 
     comparison_path = output_dir / "comparison.csv"
     per_class_path = output_dir / "per_class_metrics.csv"
@@ -275,6 +285,19 @@ def _normalize_centralized(path: Path, result: dict[str, Any]) -> dict[str, Any]
 def _normalize_local_only(path: Path, result: dict[str, Any]) -> dict[str, Any]:
     run_id = _run_id(path, "local-only", result.get("seed"))
     summary = result["summary"]
+    clients = [
+        client for client in result.get("clients", []) if isinstance(client, dict)
+    ]
+    client_f1s = [
+        float(client["global_test_metrics"]["macro_f1"])
+        for client in clients
+        if isinstance(client.get("global_test_metrics"), dict)
+        and client["global_test_metrics"].get("macro_f1") is not None
+    ]
+    # Every client is scored on the same global test set (D-024), so the
+    # unweighted mean is the fair one; local training size is what tells us
+    # whether a low score belongs to a small facility.
+    client_sizes = [int(client.get("num_train", 0)) for client in clients]
     comparison = _base_comparison(run_id, path, result)
     comparison.update(
         {
@@ -288,6 +311,16 @@ def _normalize_local_only(path: Path, result: dict[str, Any]) -> dict[str, Any]:
                 for client in result.get("clients", [])
             ),
         }
+    )
+    comparison.update(
+        _fairness_columns(
+            client_f1s,
+            num_examples=(
+                client_sizes
+                if len(client_sizes) == len(client_f1s) and sum(client_sizes) > 0
+                else None
+            ),
+        )
     )
     per_class: list[dict[str, Any]] = []
     class_order = _require_class_order(result, run_id)
@@ -331,6 +364,10 @@ def _normalize_flower(
     )
     algorithm = str(manifest["algorithm"])
     run_id = _run_id(path, algorithm, manifest.get("seed"))
+    client_scores, client_sizes = _client_eval_scores(
+        metrics_payload.get("client_history", []),
+        round_number=selected_round,
+    )
     comparison = _base_comparison(run_id, path, manifest)
     comparison.update(
         {
@@ -340,10 +377,7 @@ def _normalize_flower(
             "macro_precision": final.get(f"{prefix}macro_precision"),
             "macro_recall": final.get(f"{prefix}macro_recall"),
             "macro_f1": final.get(f"{prefix}macro_f1"),
-            "worst_client_macro_f1": _worst_client_f1(
-                metrics_payload.get("client_history", []),
-                round_number=selected_round,
-            ),
+            "worst_client_macro_f1": min(client_scores) if client_scores else None,
             "harmful_missed_as_healthy_rate": final.get(
                 f"{prefix}harmful_missed_as_healthy_rate"
             ),
@@ -361,6 +395,12 @@ def _normalize_flower(
             "checkpoint_bytes": manifest.get("checkpoint_bytes"),
         }
     )
+    comparison.update(
+        _fairness_columns(
+            client_scores,
+            num_examples=client_sizes if sum(client_sizes) > 0 else None,
+        )
+    )
     class_order = _require_class_order(manifest, run_id)
     per_class = _per_class_from_flat(run_id, final, class_order, prefix)
     size = int(final.get(f"{prefix}confusion_matrix_size", 0))
@@ -370,6 +410,77 @@ def _normalize_flower(
         "comparison": comparison,
         "per_class": per_class,
         "confusion": _confusion_rows(run_id, matrix),
+    }
+
+
+def _apply_gap_columns(rows: list[dict[str, Any]]) -> None:
+    """Fill the gap-vs-centralized columns in place, once all runs are known.
+
+    §8 calls the distance to centralized training the core result of the
+    thesis, so it is a column rather than something a reader subtracts by eye.
+    Two rules keep the column from quietly comparing the wrong pair:
+
+    * The baseline is matched on ``(seed, model)``, not on seed alone. A
+      federated MobileNetV3 run measured against a centralized EfficientNet
+      baseline would report an architecture difference as a federation cost.
+    * A run with no recorded seed is never paired. Its gap would assert a
+      same-seed comparison that nothing in the artifact supports.
+    """
+
+    baselines: dict[tuple[Any, Any], dict[str, Any]] = {}
+    for row in rows:
+        if row.get("algorithm") != "centralized" or row.get("seed") is None:
+            continue
+        key = (row.get("seed"), row.get("model"))
+        existing = baselines.get(key)
+        if existing is not None:
+            raise ValueError(
+                "two centralized baselines share seed "
+                f"{key[0]!r} and model {key[1]!r} "
+                f"({existing['run_id']} and {row['run_id']}); "
+                "export one of them so the gap column names a single baseline"
+            )
+        baselines[key] = row
+
+    for row in rows:
+        if row.get("seed") is None:
+            continue
+        baseline = baselines.get((row.get("seed"), row.get("model")))
+        if baseline is None:
+            continue
+        row["gap_vs_centralized_accuracy"] = gap_vs_centralized(
+            row.get("accuracy"), baseline.get("accuracy")
+        )
+        row["gap_vs_centralized_macro_f1"] = gap_vs_centralized(
+            row.get("macro_f1"), baseline.get("macro_f1")
+        )
+        row["gap_baseline_run_id"] = baseline["run_id"]
+
+
+def _fairness_columns(
+    scores: list[float],
+    *,
+    num_examples: list[int] | None = None,
+) -> dict[str, Any]:
+    """Map ``client_fairness`` onto comparison columns, or blanks when absent.
+
+    A single client is not a federation, so the spread of one score is left
+    blank rather than reported as a perfectly fair 0.0.
+    """
+
+    if len(scores) < 2:
+        return {
+            "best_client_macro_f1": scores[0] if scores else None,
+            "mean_client_macro_f1": scores[0] if scores else None,
+            "client_macro_f1_std": None,
+            "client_macro_f1_spread": None,
+        }
+    fairness = client_fairness(scores, num_examples=num_examples)
+    return {
+        "best_client_macro_f1": fairness["best"],
+        "mean_client_macro_f1": fairness["mean"],
+        "client_macro_f1_std": fairness["std"],
+        "client_macro_f1_spread": fairness["spread"],
     }
 
 
@@ -494,28 +605,38 @@ def _confusion_rows(run_id: str, matrix: list[list[Any]]) -> list[dict[str, Any]
     ]
 
 
-def _worst_client_f1(
+def _client_eval_scores(
     client_history: object,
     *,
     round_number: int | None = None,
-) -> float | None:
+) -> tuple[list[float], list[int]]:
+    """Return each client's macro-F1 at the selected round, with its test size.
+
+    Scores are read from one round only. Pooling rounds would average a
+    client's early bad rounds into its final score and make the federation
+    look more uniform than it is at the checkpoint actually being shipped.
+    """
+
     if not isinstance(client_history, list):
-        return None
+        return [], []
     selected_round = round_number
     if selected_round is None:
         selected_round = max(
             (int(item["round"]) for item in client_history if isinstance(item, dict)),
             default=0,
         )
-    values = [
-        float(item.get("metrics", {}).get("eval_macro_f1"))
+    entries = [
+        item
         for item in client_history
         if isinstance(item, dict)
         and item.get("phase") == "evaluate"
         and int(item.get("round", 0)) == selected_round
         and item.get("metrics", {}).get("eval_macro_f1") is not None
     ]
-    return min(values) if values else None
+    entries.sort(key=lambda item: int(item.get("client_id", 0)))
+    scores = [float(item["metrics"]["eval_macro_f1"]) for item in entries]
+    sizes = [int(item.get("num_examples", 0)) for item in entries]
+    return scores, sizes
 
 
 def _run_id(path: Path, scenario: str, seed: object) -> str:

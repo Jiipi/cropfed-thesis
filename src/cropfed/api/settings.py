@@ -34,6 +34,10 @@ class Settings:
     checkpoint_dir: Path = Path("artifacts")
     deployed_checkpoint: Path | None = None
     deployed_checkpoint_sha256: str | None = None
+    #: ``result.json`` of a centralized run, used only to compute the
+    #: gap-vs-centralized column the proposal calls the core result (§8).
+    #: Server-owned like every other path here: HTTP never supplies it (D-019).
+    centralized_baseline_result: Path | None = None
 
     def __post_init__(self) -> None:
         if (self.deployed_checkpoint is None) != (
@@ -154,6 +158,9 @@ def load_settings() -> Settings:
         deployed_checkpoint=_optional_path("CROPFED_DEPLOYED_CHECKPOINT"),
         deployed_checkpoint_sha256=(
             os.getenv("CROPFED_DEPLOYED_CHECKPOINT_SHA256") or None
+        ),
+        centralized_baseline_result=_optional_path(
+            "CROPFED_CENTRALIZED_BASELINE_RESULT"
         ),
     )
 

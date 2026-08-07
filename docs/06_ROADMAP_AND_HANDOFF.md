@@ -243,4 +243,16 @@ python -m cropfed.cli audit-data \
     --output artifacts/preflight_audit.json
 ```
 
-Trạng thái tham chiếu trên máy laptop: 164 passed / 128 subtests; audit `images=54305, errors=0`. `tests/api` cần `fastapi` — thiếu gói này thì collection lỗi, không liên quan đến đường train.
+Trạng thái tham chiếu trên máy laptop: 230 passed / 128 subtests; audit `images=54305, errors=0`. `tests/api` cần `fastapi`; cài bằng `pip install -e ".[api,dev]"` — thiếu gói này thì collection lỗi (còn 164 passed), không liên quan đến đường train.
+
+### 8.7 Mốc so sánh cho cột gap trên dashboard
+
+Cột "Khoảng cách vs tập trung" cần một `result.json` của run centralized. Đường dẫn nằm phía server, HTTP không cấp được (D-019):
+
+```bash
+export CROPFED_CENTRALIZED_BASELINE_RESULT=/data/runs/centralized-seed2026/result.json
+```
+
+Không đặt biến này thì cột hiển thị `—`, nghĩa là **chưa có mốc**, không phải gap bằng 0. Baseline bị từ chối im lặng — cột lại về `—` — trong ba trường hợp: `research_result_valid=false` (artifact pilot, D-028), `model` khác `flower_model_name` đang cấu hình, và `seed` khác seed của run đang xem. Ba trường hợp này đều sẽ biến một chênh lệch khác thành "cái giá của liên đoàn" (D-036).
+
+Dấu quy ước: `gap = centralized − federated`, nên **dương nghĩa là FL còn kém hơn**.
